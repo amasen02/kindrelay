@@ -126,7 +126,7 @@ export function TaskEditor({
   const changeCitationQuote = (quote: string) => setCitationQuote(quote);
   return (
     <section aria-labelledby="tasks">
-      <h2 id="tasks">Tasks</h2>
+      <h2 id="tasks" tabIndex={-1}>Tasks</h2>
       <label>
         Task title
         <input

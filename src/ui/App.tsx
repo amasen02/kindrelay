@@ -169,6 +169,14 @@ export function App({ services }: { services: AppServices }) {
         services={services}
         pending={busy}
         commit={importWorkspace}
+        runBusy={async (operation) => {
+          setBusy(true);
+          try {
+            return await operation();
+          } finally {
+            setBusy(false);
+          }
+        }}
       />
     </main>
   );

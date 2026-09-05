@@ -105,6 +105,27 @@ afterEach(() => {
 });
 
 describe("KindRelay review and transfer", () => {
+  it("shares the editor pending lane while a real export is preparing", async () => {
+    const { user, repository: repo, seeded: workspace } = await renderApp(makeReviewableWorkspace);
+    const approved = await repo.reviewTask(workspace.id, workspace.tasks[0].id, workspace.revision, "approved");
+    await openWorkspace(user, approved.title);
+    const transfer = screen.getByRole("region", { name: "Transfer workspace" });
+    await user.click(within(transfer).getByRole("checkbox", { name: /select.*arrange/i }));
+    await user.click(within(transfer).getByRole("checkbox", { name: /acknowledge.*share/i }));
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const realExport = packetCodec.exportApproved;
+    vi.spyOn(packetCodec, "exportApproved").mockImplementationOnce(async (...args) => {
+      await gate;
+      return realExport(...args);
+    });
+    await user.click(within(transfer).getByRole("button", { name: "Download selected JSON" }));
+    expect(screen.getByRole("button", { name: "Back to workspaces" })).toBeDisabled();
+    expect(within(transfer).getByRole("button", { name: "Download selected JSON" })).toBeDisabled();
+    release!();
+    await screen.findByText(/JSON download prepared/i);
+  });
+
   it("records an explicit rejection and never lists the rejected task for share export", async () => {
     const { user, repository: repo, seeded: workspace } = await renderApp(makeReviewableWorkspace);
     await openWorkspace(user, workspace.title);
@@ -363,8 +384,7 @@ describe("KindRelay review and transfer", () => {
 
     const padded = `${valid}${" ".repeat(16 * 1024 * 1024 + 1)}`;
     const large = new File([padded], "large.json", { type: "application/json" });
-    const read = vi.fn(async () => new TextEncoder().encode(valid).buffer);
-    Object.defineProperty(large, "arrayBuffer", { value: read });
+    const read = vi.spyOn(FileReader.prototype, "readAsArrayBuffer");
     await user.upload(screen.getByLabelText("Import a local JSON file"), large);
     expect(await screen.findByText(/Import file exceeds 16 MiB/i, { selector: '[role="alert"]' })).toBeVisible();
     expect(read).not.toHaveBeenCalled();

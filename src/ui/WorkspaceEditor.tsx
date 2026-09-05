@@ -61,6 +61,14 @@ export function WorkspaceEditor({
       setPending(false);
     }
   };
+  const runBusy = async <T,>(operation: () => Promise<T>): Promise<T> => {
+    setPending(true);
+    try {
+      return await operation();
+    } finally {
+      setPending(false);
+    }
+  };
   const reload = async () => {
     if (
       !window.confirm(
@@ -222,6 +230,7 @@ export function WorkspaceEditor({
         services={services}
         pending={pending}
         commit={commit}
+        runBusy={runBusy}
       />
     </main>
   );

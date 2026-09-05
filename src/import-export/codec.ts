@@ -36,6 +36,12 @@ const now = () => new Date().toISOString();
 const projectionId = (index: number) =>
   `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`;
 
+interface ImportedWorkspaceIdentity {
+  handoverId: string;
+  eventId: string;
+  at: string;
+}
+
 async function verifiedHandover(value: Handover): Promise<Handover> {
   const snapshot = validateHandover(value);
   for (const source of snapshot.sources) {
@@ -123,15 +129,7 @@ function assertDestinationBudget(packet: ExportPacket): void {
       });
     }
   }
-  const sourcesByTuple = [...importedSources.entries()];
-  const destination = {
-    id: projectionId(500),
-    title: "Imported handover",
-    organization: "Imported workspace",
-    createdAt: "2000-01-01T00:00:00.000Z",
-    updatedAt: "2000-01-01T00:00:00.000Z",
-    sources: sourcesByTuple.map(([, source]) => source),
-    tasks: packet.tasks.map((task, index) => ({
+  const destinationTasks: Task[] = packet.tasks.map((task, index) => ({
       id: projectionId(600 + index),
       title: task.title,
       owner: task.owner,
@@ -146,15 +144,16 @@ function assertDestinationBudget(packet: ExportPacket): void {
       })),
       reviewedAt: null,
       provenance: "imported" as const,
-    })),
-    events: [{
-      id: projectionId(1_200),
+  }));
+  const destination = buildImportedShareWorkspace(
+    importedSources.values(),
+    destinationTasks,
+    {
+      handoverId: projectionId(500),
+      eventId: projectionId(1_200),
       at: "2000-01-01T00:00:00.000Z",
-      kind: "imported" as const,
-      detail: JSON.stringify({ action: "imported" }),
-    }],
-    revision: 1,
-  };
+    },
+  );
   if (utf8Size(JSON.stringify(destination)) > DESTINATION_LIMIT)
     fail("Import destination exceeds 8 MiB; select fewer items.");
 }
@@ -192,9 +191,31 @@ export async function exportPrivateBackup(handover: Handover): Promise<PrivateBa
   return packet;
 }
 
-function importedEvent() {
-  const at = now();
-  return { id: crypto.randomUUID(), at, kind: "imported" as const, detail: JSON.stringify({ action: "imported" }) };
+function importedEvent(at: string = now(), id: string = crypto.randomUUID()) {
+  return {
+    id,
+    at,
+    kind: "imported" as const,
+    detail: JSON.stringify({ action: "imported" }),
+  };
+}
+
+function buildImportedShareWorkspace(
+  sources: Iterable<Source>,
+  tasks: Task[],
+  identity: ImportedWorkspaceIdentity,
+): Handover {
+  return {
+    id: identity.handoverId,
+    title: "Imported handover",
+    organization: "Imported workspace",
+    createdAt: identity.at,
+    updatedAt: identity.at,
+    sources: [...sources],
+    tasks,
+    events: [importedEvent(identity.at, identity.eventId)],
+    revision: 1,
+  };
 }
 
 async function importShare(packet: ExportPacket): Promise<ImportResult> {
@@ -236,11 +257,15 @@ async function importShare(packet: ExportPacket): Promise<ImportResult> {
     return localTask;
   });
   const at = now();
-  const handover = validateHandover({
-    id: crypto.randomUUID(), title: "Imported handover", organization: "Imported workspace",
-    createdAt: at, updatedAt: at, sources: [...localSources.values()], tasks,
-    events: [importedEvent()], revision: 1,
-  });
+  const handover = validateHandover(buildImportedShareWorkspace(
+    localSources.values(),
+    tasks,
+    {
+      handoverId: crypto.randomUUID(),
+      eventId: crypto.randomUUID(),
+      at,
+    },
+  ));
   return { handover, foreignReview, foreignSources };
 }
 

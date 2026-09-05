@@ -1,5 +1,5 @@
 import { IDBFactory, IDBDatabase, IDBObjectStore } from "fake-indexeddb";
-import { afterEach } from "vitest";
+import { afterEach, vi } from "vitest";
 import type { Handover, HandoverRepository } from "../../src/domain/types";
 import type { Repository } from "../../src/storage/indexeddb-repository";
 
@@ -8,6 +8,7 @@ import type { Repository } from "../../src/storage/indexeddb-repository";
 
 
 let sequence = 0;
+const repositories = new Set<Repository>();
 
 export function freshDatabase(): { name: string; factory: IDBFactory } {
   sequence += 1;
@@ -18,7 +19,12 @@ export function createRepository(
   openRepository: (name: string, factory: IDBFactory) => Promise<Repository>,
 ): Promise<Repository> {
   const { name, factory } = freshDatabase();
-  return openRepository(name, factory);
+  return openRepository(name, factory).then(trackRepository);
+}
+
+export function trackRepository(repository: Repository): Repository {
+  repositories.add(repository);
+  return repository;
 }
 
 export async function createdHandover(
@@ -31,5 +37,7 @@ export async function createdHandover(
 }
 
 afterEach(() => {
-  // Every test owns a fresh IDBFactory; its database is unreachable after teardown.
+  for (const repository of repositories) repository.close();
+  repositories.clear();
+  vi.restoreAllMocks();
 });

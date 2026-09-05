@@ -1,760 +1,261 @@
 import { sha256Utf8 } from "../domain/hash";
-import {
-  NotFoundError,
-  QuotaError,
-  RevisionConflictError,
-  StorageError,
-  ValidationError,
-} from "../domain/errors";
+import { NotFoundError, RevisionConflictError, StorageError, ValidationError } from "../domain/errors";
 import { applyMutation, type PreparedMutation } from "../domain/mutations";
 import { suggest } from "../suggestions/deterministic";
-import type {
-  CreateHandoverInput,
-  CreateSourceInput,
-  CreateTaskInput,
-  ForeignReviewRecord,
-  ForeignSourceRecord,
-  Handover,
-  HandoverId,
-  HandoverPatch,
-  HandoverRepository,
-  HandoverSummary,
-  ImportResult,
-  Revision,
-  Source,
-  SourceId,
-  SourcePatch,
-  Task,
-  TaskId,
-  TaskPatch,
-} from "../domain/types";
+import type { CreateHandoverInput, CreateSourceInput, CreateTaskInput, ForeignReviewRecord, ForeignSourceRecord, Handover, HandoverId, HandoverPatch, HandoverRepository, HandoverSummary, ImportResult, Revision, Source, SourceId, SourcePatch, Task, TaskId, TaskPatch } from "../domain/types";
 import { validateHandover, validateSourceText } from "../domain/validation";
 import { DB_VERSION, STORE_HANDOVERS, STORE_IMPORT_RECORDS } from "./schema";
+import { failOnRequestError, mapStorageError, runTransaction } from "./transactions";
 
 export interface ImportRecord {
   handoverId: string;
   foreignReview: ReadonlyArray<ForeignReviewRecord>;
   foreignSources: ReadonlyArray<ForeignSourceRecord>;
 }
-
-export interface ImportPersistence {
+export interface Repository extends HandoverRepository {
+  close(): void;
   commitImport(result: ImportResult): Promise<Handover>;
   getImportRecord(id: string): Promise<ImportRecord | null>;
 }
 
-export type Repository = HandoverRepository &
-  ImportPersistence & {
-    close(): void;
-    database: IDBDatabase;
-  };
-
-function assertKnownKeys(obj: object, allowed: string[], name: string): void {
-  if (!obj || typeof obj !== "object" || Array.isArray(obj)) {
-    throw new ValidationError(`${name} must be a plain object.`);
-  }
-  for (const key of Object.keys(obj)) {
-    if (!allowed.includes(key)) {
-      throw new ValidationError(`${name} contains unknown field ${key}.`);
-    }
-  }
+const own = (value: object, key: string) => Object.prototype.hasOwnProperty.call(value, key);
+const equal = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right);
+const invalid = (message: string): never => { throw new ValidationError(message); };
+function clone<T>(value: T, label: string): T {
+  try { return structuredClone(value); } catch { return invalid(label + " must be cloneable."); }
 }
-
-function mapError(err: unknown): Error {
-  if (
-    err instanceof ValidationError ||
-    err instanceof RevisionConflictError ||
-    err instanceof NotFoundError ||
-    err instanceof QuotaError ||
-    err instanceof StorageError
-  ) {
-    return err;
-  }
-  if (err instanceof DOMException && err.name === "QuotaExceededError") {
-    return new QuotaError();
-  }
-  const message = err instanceof Error ? err.message : String(err);
-  return new StorageError(message);
+function record(value: unknown, label: string): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value) || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) invalid(label + " must be a plain object.");
+  return value as Record<string, unknown>;
 }
+function exact(value: unknown, allowed: readonly string[], label: string): Record<string, unknown> {
+  const result = record(value, label);
+  for (const key of Object.keys(result)) if (!allowed.includes(key)) invalid(label + " contains unknown field " + key + ".");
+  return result;
+}
+function nonempty(value: unknown, label: string): string {
+  if (typeof value !== "string" || value.trim() === "") invalid(label + " must be a nonempty string.");
+  return value as string;
+}
+function nullable(value: unknown, label: string): string | null {
+  if (value !== null && typeof value !== "string") invalid(label + " must be a string or null.");
+  return value as string | null;
+}
+function revision(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) invalid(label + " must be a positive safe integer.");
+  return value as number;
+}
+function date(value: unknown, label: string): string {
+  const result = nonempty(value, label);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(result)) invalid(label + " must be an ISO date.");
+  const parts = result.split("-").map(Number); const actual = new Date(0);
+  actual.setUTCHours(0, 0, 0, 0); actual.setUTCFullYear(parts[0], parts[1] - 1, parts[2]);
+  if (actual.getUTCFullYear() !== parts[0] || actual.getUTCMonth() !== parts[1] - 1 || actual.getUTCDate() !== parts[2]) invalid(label + " must be a real ISO date.");
+  return result;
+}
+function timestamp(value: unknown, label: string): string {
+  const result = nonempty(value, label);
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(result) || new Date(result).toISOString() !== result) invalid(label + " must be an ISO UTC timestamp.");
+  return result;
+}
+function hash(value: unknown, label: string): string {
+  const result = nonempty(value, label);
+  if (!/^[a-f0-9]{64}$/.test(result)) invalid(label + " must be a lowercase SHA-256 digest.");
+  return result;
+}
+function handoverInput(value: unknown): CreateHandoverInput {
+  const input = exact(value, ["title", "organization"], "CreateHandoverInput");
+  return { title: nonempty(input.title, "CreateHandoverInput.title"), organization: nonempty(input.organization, "CreateHandoverInput.organization") };
+}
+function sourceInput(value: unknown): CreateSourceInput {
+  const input = exact(value, ["title", "text"], "CreateSourceInput");
+  const text = nonempty(input.text, "CreateSourceInput.text"); validateSourceText(text);
+  return { title: nonempty(input.title, "CreateSourceInput.title"), text };
+}
+function hPatch(value: unknown): HandoverPatch {
+  const input = exact(value, ["title", "organization"], "HandoverPatch"); const result: HandoverPatch = {};
+  if (own(input, "title")) result.title = nonempty(input.title, "HandoverPatch.title");
+  if (own(input, "organization")) result.organization = nonempty(input.organization, "HandoverPatch.organization");
+  return result;
+}
+function sPatch(value: unknown): SourcePatch {
+  const input = exact(value, ["title", "text"], "SourcePatch"); const result: SourcePatch = {};
+  if (own(input, "title")) result.title = nonempty(input.title, "SourcePatch.title");
+  if (own(input, "text")) { result.text = nonempty(input.text, "SourcePatch.text"); validateSourceText(result.text); }
+  return result;
+}
+function tInput(value: unknown): CreateTaskInput {
+  const input = exact(value, ["title", "owner", "dueDate", "citations", "provenance"], "CreateTaskInput");
+  const provenance = own(input, "provenance") ? input.provenance : "manual";
+  if (provenance !== "manual" && provenance !== "deterministic-suggestion") invalid("CreateTaskInput.provenance is invalid.");
+  if (!Array.isArray(input.citations)) invalid("CreateTaskInput.citations must be an array.");
+  const result: CreateTaskInput = { title: nonempty(input.title, "CreateTaskInput.title"), citations: clone(input.citations, "CreateTaskInput.citations") as CreateTaskInput["citations"], provenance: provenance as CreateTaskInput["provenance"] };
+  if (own(input, "owner")) result.owner = nullable(input.owner, "CreateTaskInput.owner");
+  if (own(input, "dueDate")) result.dueDate = input.dueDate === null ? null : date(input.dueDate, "CreateTaskInput.dueDate");
+  return result;
+}
+function tPatch(value: unknown): TaskPatch {
+  const input = exact(value, ["title", "owner", "dueDate", "citations"], "TaskPatch"); const result: TaskPatch = {};
+  if (own(input, "title")) result.title = nonempty(input.title, "TaskPatch.title");
+  if (own(input, "owner")) result.owner = nullable(input.owner, "TaskPatch.owner");
+  if (own(input, "dueDate")) result.dueDate = input.dueDate === null ? null : date(input.dueDate, "TaskPatch.dueDate");
+  if (own(input, "citations")) { if (!Array.isArray(input.citations)) invalid("TaskPatch.citations must be an array."); result.citations = clone(input.citations, "TaskPatch.citations") as TaskPatch["citations"]; }
+  return result;
+}
+function metadata(value: unknown, handover: Handover): ImportRecord {
+  const input = exact(value, ["handoverId", "foreignReview", "foreignSources"], "import record");
+  const handoverId = nonempty(input.handoverId, "import record.handoverId");
+  if (handoverId !== handover.id || !Array.isArray(input.foreignReview) || !Array.isArray(input.foreignSources)) invalid("import record is invalid.");
+  const tasks = new Set(handover.tasks.map((task) => task.id)); const sources = new Set(handover.sources.map((source) => source.id));
+  const reviewSeen = new Set<string>(); const sourceSeen = new Set<string>();
+  const foreignReview = (input.foreignReview as unknown[]).map((value) => {
+    const row = exact(value, ["taskId", "importedState", "importedReviewedAt"], "foreign review");
+    const taskId = nonempty(row.taskId, "foreign review.taskId");
+    if (!tasks.has(taskId) || reviewSeen.has(taskId)) invalid("foreign review references an invalid or duplicate task.");
+    reviewSeen.add(taskId);
+    if (row.importedState !== "draft" && row.importedState !== "approved" && row.importedState !== "rejected") invalid("foreign review state is invalid.");
+    const importedReviewedAt = row.importedReviewedAt === null ? null : timestamp(row.importedReviewedAt, "foreign review.importedReviewedAt");
+    if ((row.importedState === "draft") !== (importedReviewedAt === null)) invalid("foreign review state and timestamp disagree.");
+    return { taskId, importedState: row.importedState as ForeignReviewRecord["importedState"], importedReviewedAt };
+  });
+  const foreignSources = (input.foreignSources as unknown[]).map((value) => {
+    const row = exact(value, ["localSourceId", "originalSourceId", "originalSourceRevision", "originalSourceSha256", "excerptSha256"], "foreign source");
+    const localSourceId = nonempty(row.localSourceId, "foreign source.localSourceId");
+    if (!sources.has(localSourceId) || sourceSeen.has(localSourceId)) invalid("foreign source references an invalid or duplicate source.");
+    sourceSeen.add(localSourceId);
+    return { localSourceId, originalSourceId: nonempty(row.originalSourceId, "foreign source.originalSourceId"), originalSourceRevision: revision(row.originalSourceRevision, "foreign source.originalSourceRevision"), originalSourceSha256: hash(row.originalSourceSha256, "foreign source.originalSourceSha256"), excerptSha256: hash(row.excerptSha256, "foreign source.excerptSha256") };
+  });
+  return { handoverId, foreignReview, foreignSources };
+}
+let lastTime = 0;
+function now(): string { lastTime = Math.max(lastTime + 1, Date.now()); return new Date(lastTime).toISOString(); }
 
-function runTransaction<T>(
-  db: IDBDatabase,
-  storeNames: string[],
-  mode: IDBTransactionMode,
-  operation: (tx: IDBTransaction) => Promise<T> | T,
-): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    let result: T;
-    let opError: unknown = null;
-    let tx: IDBTransaction;
-    try {
-      tx = db.transaction(storeNames, mode);
-    } catch (err) {
-      return reject(mapError(err));
-    }
-
-    tx.oncomplete = () => {
-      if (opError !== null) {
-        reject(mapError(opError));
-      } else {
-        resolve(result);
-      }
+export function openRepository(name: string, factory: IDBFactory = globalThis.indexedDB): Promise<Repository> {
+  return new Promise((resolve, reject) => {
+    let terminal = false; const rejectOnce = (error: unknown) => { if (!terminal) { terminal = true; reject(mapStorageError(error)); } };
+    let open: IDBOpenDBRequest; try { open = factory.open(name, DB_VERSION); } catch (error) { rejectOnce(error); return; }
+    open.onupgradeneeded = () => {
+      const db = open.result;
+      if (!db.objectStoreNames.contains(STORE_HANDOVERS)) db.createObjectStore(STORE_HANDOVERS, { keyPath: "id" });
+      if (!db.objectStoreNames.contains(STORE_IMPORT_RECORDS)) db.createObjectStore(STORE_IMPORT_RECORDS, { keyPath: "handoverId" });
     };
-
-    tx.onerror = () => {
-      const errorToReject = opError ?? tx.error;
-      reject(mapError(errorToReject));
-    };
-
-    tx.onabort = () => {
-      const errorToReject = opError ?? tx.error ?? new StorageError("Transaction aborted");
-      reject(mapError(errorToReject));
-    };
-
-    try {
-      const maybePromise = operation(tx);
-      if (maybePromise && typeof (maybePromise as Promise<T>).then === "function") {
-        (maybePromise as Promise<T>).then(
-          (val) => {
-            result = val;
-          },
-          (err) => {
-            opError = err;
+    open.onerror = () => rejectOnce(open.error ?? new StorageError());
+    open.onblocked = () => rejectOnce(new StorageError("Database open blocked."));
+    open.onsuccess = () => {
+      const db = open.result; if (terminal) { db.close(); return; } terminal = true; db.onversionchange = () => db.close();
+      const read = (handoverId: HandoverId) => runTransaction<Handover | null>(db, [STORE_HANDOVERS], "readonly", (tx, control) => {
+        const get = failOnRequestError(tx.objectStore(STORE_HANDOVERS).get(handoverId), control.fail);
+        get.onsuccess = () => { try { control.succeed(get.result === undefined ? null : validateHandover(get.result)); } catch (error) { control.fail(error); } };
+      });
+      const check = async (handoverId: HandoverId, expected: Revision) => {
+        const current = await read(handoverId);
+        if (!current) throw new NotFoundError("Handover was not found.");
+        if (current.revision !== expected) throw new RevisionConflictError(undefined, expected, current.revision);
+        return current;
+      };
+      const mutate = (handoverId: HandoverId, expected: Revision, command: PreparedMutation, filter?: "source" | "task") =>
+        runTransaction<Handover>(db, filter ? [STORE_HANDOVERS, STORE_IMPORT_RECORDS] : [STORE_HANDOVERS], "readwrite", (tx, control) => {
+          const handovers = tx.objectStore(STORE_HANDOVERS); const get = failOnRequestError(handovers.get(handoverId), control.fail);
+          get.onsuccess = () => {
             try {
-              tx.abort();
-            } catch {
-              // Ignore if already aborted
-            }
-          },
-        );
-      } else {
-        result = maybePromise as T;
-      }
-    } catch (err) {
-      opError = err;
-      try {
-        tx.abort();
-      } catch {
-        // Ignore if already aborted
-      }
-    }
-  });
-}
-
-function reqToPromise<T>(req: IDBRequest<T>): Promise<T> {
-  return new Promise((resolve, reject) => {
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
-}
-
-export function openRepository(
-  name: string,
-  factory: IDBFactory = globalThis.indexedDB,
-): Promise<Repository> {
-  return new Promise((resolve, reject) => {
-    const openReq = factory.open(name, DB_VERSION);
-
-    openReq.onupgradeneeded = () => {
-      const db = openReq.result;
-      if (!db.objectStoreNames.contains(STORE_HANDOVERS)) {
-        db.createObjectStore(STORE_HANDOVERS, { keyPath: "id" });
-      }
-      if (!db.objectStoreNames.contains(STORE_IMPORT_RECORDS)) {
-        db.createObjectStore(STORE_IMPORT_RECORDS, { keyPath: "handoverId" });
-      }
-    };
-
-    openReq.onerror = () => reject(mapError(openReq.error));
-    openReq.onblocked = () => reject(new StorageError("Database open blocked"));
-
-    openReq.onsuccess = () => {
-      const db = openReq.result;
-
-      db.onversionchange = () => {
-        db.close();
-      };
-
-      async function readSnapshot(id: HandoverId): Promise<Handover | null> {
-        return runTransaction(db, [STORE_HANDOVERS], "readonly", (tx) => {
-          const store = tx.objectStore(STORE_HANDOVERS);
-          const req = store.get(id);
-          return new Promise<Handover | null>((res, rej) => {
-            req.onsuccess = () => {
-              if (!req.result) {
-                res(null);
-              } else {
+              if (get.result === undefined) return control.fail(new NotFoundError("Handover was not found."));
+              const current = validateHandover(get.result);
+              if (current.revision !== expected) return control.fail(new RevisionConflictError(undefined, expected, current.revision));
+              const next = applyMutation(current, command, { at: now(), eventId: crypto.randomUUID() });
+              if (next === current) return control.succeed(current);
+              failOnRequestError(handovers.put(next), control.fail);
+              if (!filter) return control.succeed(next);
+              const records = tx.objectStore(STORE_IMPORT_RECORDS); const recordGet = failOnRequestError(records.get(handoverId), control.fail);
+              recordGet.onsuccess = () => {
                 try {
-                  const val = validateHandover(req.result);
-                  res(val);
-                } catch (e) {
-                  rej(e);
-                }
-              }
-            };
-            req.onerror = () => rej(req.error);
-          });
-        });
-      }
-
-let lastTimestamp = 0;
-function nextIsoTimestamp(): string {
-  let now = Date.now();
-  if (now <= lastTimestamp) {
-    now = lastTimestamp + 1;
-  }
-  lastTimestamp = now;
-  return new Date(now).toISOString();
-}
-
-      async function executeMutation(
-        id: HandoverId,
-        expectedRevision: Revision,
-        command: PreparedMutation,
-        extraStoreNames: string[] = [],
-      ): Promise<Handover> {
-        const at = nextIsoTimestamp();
-        const eventId = crypto.randomUUID();
-        const context = { at, eventId };
-        const stores = Array.from(new Set([STORE_HANDOVERS, ...extraStoreNames]));
-
-        return runTransaction(db, stores, "readwrite", (tx) => {
-          const store = tx.objectStore(STORE_HANDOVERS);
-          const req = store.get(id);
-
-          return new Promise<Handover>((res, rej) => {
-            req.onsuccess = () => {
-              const current = req.result as Handover | undefined;
-              if (!current) {
-                return rej(new NotFoundError(`Handover ${id} was not found.`));
-              }
-              if (current.revision !== expectedRevision) {
-                return rej(
-                  new RevisionConflictError(
-                    undefined,
-                    expectedRevision,
-                    current.revision,
-                  ),
-                );
-              }
-
-              let next: Handover;
-              try {
-                next = applyMutation(current, command, context);
-              } catch (err) {
-                return rej(err);
-              }
-
-              if (next === current) {
-                return res(current);
-              }
-
-              try {
-                validateHandover(next);
-                store.put(next);
-              } catch (err) {
-                return rej(err);
-              }
-
-              if (command.kind === "delete-source" && tx.objectStoreNames.contains(STORE_IMPORT_RECORDS)) {
-                const impStore = tx.objectStore(STORE_IMPORT_RECORDS);
-                const impReq = impStore.get(id);
-                impReq.onsuccess = () => {
-                  const impRec = impReq.result as ImportRecord | undefined;
-                  if (impRec) {
-                    const filtered = {
-                      ...impRec,
-                      foreignSources: impRec.foreignSources.filter(
-                        (fs) => fs.localSourceId !== command.sourceId,
-                      ),
-                    };
-                    impStore.put(filtered);
+                  if (recordGet.result !== undefined) {
+                    const currentRecord = metadata(recordGet.result, current);
+                    const updated: ImportRecord = filter === "source"
+                      ? { ...currentRecord, foreignSources: currentRecord.foreignSources.filter((item) => item.localSourceId !== (command as { sourceId: string }).sourceId) }
+                      : { ...currentRecord, foreignReview: currentRecord.foreignReview.filter((item) => item.taskId !== (command as { taskId: string }).taskId) };
+                    failOnRequestError(records.put(updated), control.fail);
                   }
-                };
-              } else if (command.kind === "delete-task" && tx.objectStoreNames.contains(STORE_IMPORT_RECORDS)) {
-                const impStore = tx.objectStore(STORE_IMPORT_RECORDS);
-                const impReq = impStore.get(id);
-                impReq.onsuccess = () => {
-                  const impRec = impReq.result as ImportRecord | undefined;
-                  if (impRec) {
-                    const filtered = {
-                      ...impRec,
-                      foreignReview: impRec.foreignReview.filter(
-                        (fr) => fr.taskId !== command.taskId,
-                      ),
-                    };
-                    impStore.put(filtered);
-                  }
-                };
-              }
-
-              res(next);
-            };
-            req.onerror = () => rej(req.error);
-          });
-        });
-      }
-
-      const repository: Repository = {
-        database: db,
-
-        close() {
-          db.close();
-        },
-
-        async createHandover(input: CreateHandoverInput): Promise<Handover> {
-          assertKnownKeys(input, ["title", "organization"], "CreateHandoverInput");
-          if (!input.title || !input.organization) {
-            throw new ValidationError("Title and organization are required.");
-          }
-          const id = crypto.randomUUID();
-          const createdAt = nextIsoTimestamp();
-          const initial: Handover = {
-            id,
-            title: input.title,
-            organization: input.organization,
-            createdAt,
-            updatedAt: createdAt,
-            sources: [],
-            tasks: [],
-            events: [
-              {
-                id: crypto.randomUUID(),
-                at: createdAt,
-                kind: "created",
-                detail: JSON.stringify({ action: "created", handoverId: id }),
-              },
-            ],
-            revision: 1,
-          };
-          validateHandover(initial);
-
-          await runTransaction(db, [STORE_HANDOVERS], "readwrite", (tx) => {
-            const store = tx.objectStore(STORE_HANDOVERS);
-            store.add(initial);
-          });
-
-          return initial;
-        },
-
-        async getHandover(id: HandoverId): Promise<Handover | null> {
-          return readSnapshot(id);
-        },
-
-        async listHandovers(): Promise<ReadonlyArray<HandoverSummary>> {
-          const list = await runTransaction(
-            db,
-            [STORE_HANDOVERS],
-            "readonly",
-            (tx) => {
-              const store = tx.objectStore(STORE_HANDOVERS);
-              return reqToPromise(store.getAll());
-            },
-          );
-
-          const summaries: HandoverSummary[] = list.map((h: Handover) => ({
-            id: h.id,
-            title: h.title,
-            organization: h.organization,
-            updatedAt: h.updatedAt,
-            revision: h.revision,
-          }));
-
-          summaries.sort((a, b) => {
-            const timeDiff =
-              new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
-            if (timeDiff !== 0) return timeDiff;
-            return b.id.localeCompare(a.id);
-          });
-
-          return summaries;
-        },
-
-        async updateHandover(
-          id: HandoverId,
-          expectedRevision: Revision,
-          patch: HandoverPatch,
-        ): Promise<Handover> {
-          assertKnownKeys(patch, ["title", "organization"], "HandoverPatch");
-          const snapshot = await readSnapshot(id);
-          if (!snapshot) throw new NotFoundError(`Handover ${id} was not found.`);
-          if (snapshot.revision !== expectedRevision) {
-            throw new RevisionConflictError(
-              undefined,
-              expectedRevision,
-              snapshot.revision,
-            );
-          }
-
-          return executeMutation(id, expectedRevision, {
-            kind: "update-handover",
-            patch,
-          });
-        },
-
-        async addSource(
-          id: HandoverId,
-          expectedRevision: Revision,
-          input: CreateSourceInput,
-        ): Promise<Handover> {
-          assertKnownKeys(input, ["title", "text"], "CreateSourceInput");
-          const snapshot = await readSnapshot(id);
-          if (!snapshot) throw new NotFoundError(`Handover ${id} was not found.`);
-          if (snapshot.revision !== expectedRevision) {
-            throw new RevisionConflictError(
-              undefined,
-              expectedRevision,
-              snapshot.revision,
-            );
-          }
-
-          validateSourceText(input.text);
-          const sha = await sha256Utf8(input.text);
-
-          const source: Source = {
-            id: crypto.randomUUID(),
-            title: input.title,
-            text: input.text,
-            sha256: sha,
-            revision: 1,
-          };
-
-          return executeMutation(id, expectedRevision, {
-            kind: "add-source",
-            source,
-          });
-        },
-
-        async updateSource(
-          id: HandoverId,
-          sourceId: SourceId,
-          expectedRevision: Revision,
-          patch: SourcePatch,
-        ): Promise<Handover> {
-          assertKnownKeys(patch, ["title", "text"], "SourcePatch");
-          const snapshot = await readSnapshot(id);
-          if (!snapshot) throw new NotFoundError(`Handover ${id} was not found.`);
-          if (snapshot.revision !== expectedRevision) {
-            throw new RevisionConflictError(
-              undefined,
-              expectedRevision,
-              snapshot.revision,
-            );
-          }
-
-          const existingSource = snapshot.sources.find((s) => s.id === sourceId);
-          if (!existingSource) {
-            throw new NotFoundError(`Source ${sourceId} was not found.`);
-          }
-
-          const nextTitle = patch.title !== undefined ? patch.title : existingSource.title;
-          const nextText = patch.text !== undefined ? patch.text : existingSource.text;
-          if (patch.text !== undefined) {
-            validateSourceText(nextText);
-          }
-
-          const nextSha =
-            patch.text !== undefined && patch.text !== existingSource.text
-              ? await sha256Utf8(nextText)
-              : existingSource.sha256;
-
-          const source: Source = {
-            id: sourceId,
-            title: nextTitle,
-            text: nextText,
-            sha256: nextSha,
-            revision: existingSource.revision,
-          };
-
-          return executeMutation(id, expectedRevision, {
-            kind: "update-source",
-            sourceId,
-            source,
-          });
-        },
-
-        async addTask(
-          id: HandoverId,
-          expectedRevision: Revision,
-          input: CreateTaskInput,
-        ): Promise<Handover> {
-          if (input.provenance === "deterministic-suggestion") {
-            assertKnownKeys(
-              input,
-              ["id", "title", "owner", "dueDate", "citations", "state", "reviewedAt", "provenance"],
-              "CreateTaskInput",
-            );
-            if ((input as { state?: string }).state !== "draft") {
-              throw new ValidationError("Deterministic suggestion state must be draft.");
-            }
-            if ((input as { reviewedAt?: string | null }).reviewedAt !== null) {
-              throw new ValidationError("Deterministic suggestion reviewedAt must be null.");
-            }
-          } else {
-            assertKnownKeys(
-              input,
-              ["id", "title", "owner", "dueDate", "citations", "provenance"],
-              "CreateTaskInput",
-            );
-          }
-
-          const snapshot = await readSnapshot(id);
-          if (!snapshot) throw new NotFoundError(`Handover ${id} was not found.`);
-          if (snapshot.revision !== expectedRevision) {
-            throw new RevisionConflictError(
-              undefined,
-              expectedRevision,
-              snapshot.revision,
-            );
-          }
-
-          let taskId: string;
-          let provenance: Task["provenance"];
-
-          if (input.provenance === "deterministic-suggestion") {
-            const rawId = (input as { id?: string }).id;
-            if (!rawId) {
-              throw new ValidationError("Deterministic suggestion missing ID.");
-            }
-            taskId = rawId;
-            provenance = "deterministic-suggestion";
-          } else {
-            const rawId = (input as { id?: string }).id;
-            if (rawId) {
-              taskId = rawId;
-            } else {
-              let count = 1;
-              while (snapshot.tasks.some((t) => t.id === `task-${count}`)) {
-                count++;
-              }
-              taskId = `task-${count}`;
-            }
-            provenance = input.provenance ?? "manual";
-          }
-
-          const task: Task = {
-            id: taskId,
-            title: input.title,
-            owner: input.owner ?? null,
-            dueDate: input.dueDate ?? null,
-            state: "draft",
-            citations: input.citations ?? [],
-            reviewedAt: null,
-            provenance,
-          };
-
-          return executeMutation(id, expectedRevision, {
-            kind: "add-task",
-            task,
-          });
-        },
-
-        async updateTask(
-          id: HandoverId,
-          taskId: TaskId,
-          expectedRevision: Revision,
-          patch: TaskPatch,
-        ): Promise<Handover> {
-          assertKnownKeys(
-            patch,
-            ["title", "owner", "dueDate", "citations"],
-            "TaskPatch",
-          );
-          const snapshot = await readSnapshot(id);
-          if (!snapshot) throw new NotFoundError(`Handover ${id} was not found.`);
-          if (snapshot.revision !== expectedRevision) {
-            throw new RevisionConflictError(
-              undefined,
-              expectedRevision,
-              snapshot.revision,
-            );
-          }
-
-          return executeMutation(id, expectedRevision, {
-            kind: "update-task",
-            taskId,
-            patch,
-          });
-        },
-
-        async reviewTask(
-          id: HandoverId,
-          taskId: TaskId,
-          expectedRevision: Revision,
-          decision: "approved" | "rejected",
-        ): Promise<Handover> {
-          const snapshot = await readSnapshot(id);
-          if (!snapshot) throw new NotFoundError(`Handover ${id} was not found.`);
-          if (snapshot.revision !== expectedRevision) {
-            throw new RevisionConflictError(
-              undefined,
-              expectedRevision,
-              snapshot.revision,
-            );
-          }
-
-          return executeMutation(id, expectedRevision, {
-            kind: "review-task",
-            taskId,
-            decision,
-          });
-        },
-
-        async deleteHandover(
-          id: HandoverId,
-          expectedRevision: Revision,
-        ): Promise<void> {
-          const snapshot = await readSnapshot(id);
-          if (!snapshot) throw new NotFoundError(`Handover ${id} was not found.`);
-          if (snapshot.revision !== expectedRevision) {
-            throw new RevisionConflictError(
-              undefined,
-              expectedRevision,
-              snapshot.revision,
-            );
-          }
-
-          await runTransaction(
-            db,
-            [STORE_HANDOVERS, STORE_IMPORT_RECORDS],
-            "readwrite",
-            (tx) => {
-              const hStore = tx.objectStore(STORE_HANDOVERS);
-              const impStore = tx.objectStore(STORE_IMPORT_RECORDS);
-
-              const req = hStore.get(id);
-              req.onsuccess = () => {
-                const curr = req.result as Handover | undefined;
-                if (!curr) throw new NotFoundError(`Handover ${id} not found.`);
-                if (curr.revision !== expectedRevision) {
-                  throw new RevisionConflictError(
-                    undefined,
-                    expectedRevision,
-                    curr.revision,
-                  );
-                }
-                hStore.delete(id);
-                impStore.delete(id);
+                  control.succeed(next);
+                } catch (error) { control.fail(error); }
               };
-            },
-          );
-        },
-
-        async deleteSource(
-          id: HandoverId,
-          sourceId: SourceId,
-          expectedRevision: Revision,
-        ): Promise<Handover> {
-          const snapshot = await readSnapshot(id);
-          if (!snapshot) throw new NotFoundError(`Handover ${id} was not found.`);
-          if (snapshot.revision !== expectedRevision) {
-            throw new RevisionConflictError(
-              undefined,
-              expectedRevision,
-              snapshot.revision,
-            );
-          }
-
-          return executeMutation(
-            id,
-            expectedRevision,
-            { kind: "delete-source", sourceId },
-            [STORE_IMPORT_RECORDS],
-          );
-        },
-
-        async deleteTask(
-          id: HandoverId,
-          taskId: TaskId,
-          expectedRevision: Revision,
-        ): Promise<Handover> {
-          const snapshot = await readSnapshot(id);
-          if (!snapshot) throw new NotFoundError(`Handover ${id} was not found.`);
-          if (snapshot.revision !== expectedRevision) {
-            throw new RevisionConflictError(
-              undefined,
-              expectedRevision,
-              snapshot.revision,
-            );
-          }
-
-          return executeMutation(
-            id,
-            expectedRevision,
-            { kind: "delete-task", taskId },
-            [STORE_IMPORT_RECORDS],
-          );
-        },
-
-        async commitImport(result: ImportResult): Promise<Handover> {
-          validateHandover(result.handover);
-
-          if (result.handover.revision !== 1) {
-            throw new ValidationError("Imported workspace must start at revision 1.");
-          }
-
-          for (const task of result.handover.tasks) {
-            if (
-              task.state !== "draft" ||
-              task.reviewedAt !== null ||
-              task.provenance !== "imported"
-            ) {
-              throw new ValidationError(
-                "All imported tasks must be draft, unreviewed, and have imported provenance.",
-              );
-            }
-          }
-
-          for (const source of result.handover.sources) {
-            const actualSha = await sha256Utf8(source.text);
-            if (actualSha !== source.sha256) {
-              throw new ValidationError(`Source hash mismatch for ${source.id}`);
-            }
-          }
-
-          const existingSnapshot = await readSnapshot(result.handover.id);
-          if (existingSnapshot) {
-            throw new ValidationError(`Handover with ID ${result.handover.id} already exists.`);
-          }
-
-          const importRecord: ImportRecord = {
-            handoverId: result.handover.id,
-            foreignReview: result.foreignReview,
-            foreignSources: result.foreignSources,
+            } catch (error) { control.fail(error); }
           };
-
-          await runTransaction(
-            db,
-            [STORE_HANDOVERS, STORE_IMPORT_RECORDS],
-            "readwrite",
-            (tx) => {
-              const hStore = tx.objectStore(STORE_HANDOVERS);
-              const impStore = tx.objectStore(STORE_IMPORT_RECORDS);
-
-              hStore.add(result.handover);
-              impStore.add(importRecord);
-            },
-          );
-
-          return result.handover;
+        });
+      const repository: Repository = {
+        close: () => db.close(),
+        async createHandover(input) {
+          const prepared = handoverInput(clone(input, "CreateHandoverInput")); const at = now();
+          const handover: Handover = { id: crypto.randomUUID(), title: prepared.title, organization: prepared.organization, createdAt: at, updatedAt: at, sources: [], tasks: [], events: [{ id: crypto.randomUUID(), at, kind: "created", detail: JSON.stringify({ action: "created" }) }], revision: 1 };
+          validateHandover(handover);
+          return runTransaction(db, [STORE_HANDOVERS], "readwrite", (tx, control) => { failOnRequestError(tx.objectStore(STORE_HANDOVERS).add(handover), control.fail); control.succeed(handover); });
         },
-
-        async getImportRecord(id: string): Promise<ImportRecord | null> {
-          return runTransaction(
-            db,
-            [STORE_IMPORT_RECORDS],
-            "readonly",
-            (tx) => {
-              const store = tx.objectStore(STORE_IMPORT_RECORDS);
-              const req = store.get(id);
-              return new Promise<ImportRecord | null>((res, rej) => {
-                req.onsuccess = () => res(req.result ?? null);
-                req.onerror = () => rej(req.error);
-              });
-            },
-          );
+        getHandover(handoverId) { nonempty(handoverId, "handover ID"); return read(handoverId); },
+        listHandovers() {
+          return runTransaction<ReadonlyArray<HandoverSummary>>(db, [STORE_HANDOVERS], "readonly", (tx, control) => {
+            const getAll = failOnRequestError(tx.objectStore(STORE_HANDOVERS).getAll(), control.fail);
+            getAll.onsuccess = () => { try {
+              const result = getAll.result.map((value) => { const handover = validateHandover(value); return { id: handover.id, title: handover.title, organization: handover.organization, updatedAt: handover.updatedAt, revision: handover.revision }; });
+              result.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt) || right.id.localeCompare(left.id)); control.succeed(result);
+            } catch (error) { control.fail(error); } };
+          });
+        },
+        async updateHandover(handoverId, expected, patch) { nonempty(handoverId, "handover ID"); revision(expected, "expectedRevision"); const prepared = hPatch(clone(patch, "HandoverPatch")); await check(handoverId, expected); return mutate(handoverId, expected, { kind: "update-handover", patch: prepared }); },
+        async addSource(handoverId, expected, input) {
+          nonempty(handoverId, "handover ID"); revision(expected, "expectedRevision"); const prepared = sourceInput(clone(input, "CreateSourceInput")); await check(handoverId, expected);
+          const source: Source = { id: crypto.randomUUID(), title: prepared.title, text: prepared.text, sha256: await sha256Utf8(prepared.text), revision: 1 };
+          return mutate(handoverId, expected, { kind: "add-source", source });
+        },
+        async updateSource(handoverId, sourceId, expected, patch) {
+          nonempty(handoverId, "handover ID"); nonempty(sourceId, "source ID"); revision(expected, "expectedRevision"); const prepared = sPatch(clone(patch, "SourcePatch"));
+          const handover = await check(handoverId, expected); const current = handover.sources.find((source) => source.id === sourceId);
+          if (!current) throw new NotFoundError("Source was not found.");
+          const nextText = prepared.text ?? current.text;
+          const source: Source = { id: sourceId, title: prepared.title ?? current.title, text: nextText, sha256: nextText === current.text ? current.sha256 : await sha256Utf8(nextText), revision: current.revision };
+          return mutate(handoverId, expected, { kind: "update-source", sourceId, source });
+        },
+        async addTask(handoverId, expected, input) {
+          nonempty(handoverId, "handover ID"); revision(expected, "expectedRevision"); const prepared = tInput(clone(input, "CreateTaskInput")); const handover = await check(handoverId, expected);
+          const task: Task = prepared.provenance === "deterministic-suggestion"
+            ? (() => { const candidate = handover.sources.flatMap(suggest).find((item) => item.title === prepared.title && item.owner === (prepared.owner ?? null) && item.dueDate === (prepared.dueDate ?? null) && equal(item.citations, prepared.citations)); if (!candidate) return invalid("Deterministic suggestion does not match current sources."); return clone(candidate, "deterministic suggestion"); })()
+            : { id: crypto.randomUUID(), title: prepared.title, owner: prepared.owner ?? null, dueDate: prepared.dueDate ?? null, citations: prepared.citations, state: "draft", reviewedAt: null, provenance: "manual" };
+          return mutate(handoverId, expected, { kind: "add-task", task });
+        },
+        async updateTask(handoverId, taskId, expected, patch) { nonempty(handoverId, "handover ID"); nonempty(taskId, "task ID"); revision(expected, "expectedRevision"); const prepared = tPatch(clone(patch, "TaskPatch")); await check(handoverId, expected); return mutate(handoverId, expected, { kind: "update-task", taskId, patch: prepared }); },
+        async reviewTask(handoverId, taskId, expected, decision) { nonempty(handoverId, "handover ID"); nonempty(taskId, "task ID"); revision(expected, "expectedRevision"); if (decision !== "approved" && decision !== "rejected") invalid("review decision is invalid."); await check(handoverId, expected); return mutate(handoverId, expected, { kind: "review-task", taskId, decision }); },
+        async deleteHandover(handoverId, expected) {
+          nonempty(handoverId, "handover ID"); revision(expected, "expectedRevision"); await check(handoverId, expected);
+          await runTransaction<void>(db, [STORE_HANDOVERS, STORE_IMPORT_RECORDS], "readwrite", (tx, control) => {
+            const handovers = tx.objectStore(STORE_HANDOVERS); const get = failOnRequestError(handovers.get(handoverId), control.fail);
+            get.onsuccess = () => { try {
+              if (get.result === undefined) return control.fail(new NotFoundError("Handover was not found."));
+              const current = validateHandover(get.result); if (current.revision !== expected) return control.fail(new RevisionConflictError(undefined, expected, current.revision));
+              failOnRequestError(handovers.delete(handoverId), control.fail); failOnRequestError(tx.objectStore(STORE_IMPORT_RECORDS).delete(handoverId), control.fail); control.succeed(undefined);
+            } catch (error) { control.fail(error); } };
+          });
+        },
+        async deleteSource(handoverId, sourceId, expected) { nonempty(handoverId, "handover ID"); nonempty(sourceId, "source ID"); revision(expected, "expectedRevision"); await check(handoverId, expected); return mutate(handoverId, expected, { kind: "delete-source", sourceId }, "source"); },
+        async deleteTask(handoverId, taskId, expected) { nonempty(handoverId, "handover ID"); nonempty(taskId, "task ID"); revision(expected, "expectedRevision"); await check(handoverId, expected); return mutate(handoverId, expected, { kind: "delete-task", taskId }, "task"); },
+        async commitImport(result) {
+          const packet = exact(clone(result, "ImportResult"), ["handover", "foreignReview", "foreignSources"], "ImportResult"); const handover = validateHandover(packet.handover);
+          if (handover.revision !== 1) invalid("Imported workspace must start at revision 1.");
+          for (const task of handover.tasks) if (task.state !== "draft" || task.reviewedAt !== null || task.provenance !== "imported") invalid("Imported tasks must be draft, unreviewed, and imported.");
+          const importRecord = metadata({ handoverId: handover.id, foreignReview: packet.foreignReview, foreignSources: packet.foreignSources }, handover);
+          for (const source of handover.sources) if (await sha256Utf8(source.text) !== source.sha256) invalid("Source hash mismatch.");
+          if (await read(handover.id)) invalid("Handover ID already exists.");
+          return runTransaction(db, [STORE_HANDOVERS, STORE_IMPORT_RECORDS], "readwrite", (tx, control) => { failOnRequestError(tx.objectStore(STORE_HANDOVERS).add(handover), control.fail); failOnRequestError(tx.objectStore(STORE_IMPORT_RECORDS).add(importRecord), control.fail); control.succeed(handover); });
+        },
+        getImportRecord(handoverId) {
+          nonempty(handoverId, "handover ID");
+          return runTransaction<ImportRecord | null>(db, [STORE_HANDOVERS, STORE_IMPORT_RECORDS], "readonly", (tx, control) => {
+            const recordGet = failOnRequestError(tx.objectStore(STORE_IMPORT_RECORDS).get(handoverId), control.fail);
+            recordGet.onsuccess = () => { try {
+              if (recordGet.result === undefined) return control.succeed(null);
+              const handoverGet = failOnRequestError(tx.objectStore(STORE_HANDOVERS).get(handoverId), control.fail);
+              handoverGet.onsuccess = () => { try { if (handoverGet.result === undefined) return control.fail(new ValidationError("Import metadata references a missing handover.")); control.succeed(metadata(recordGet.result, validateHandover(handoverGet.result))); } catch (error) { control.fail(error); } };
+            } catch (error) { control.fail(error); } };
+          });
         },
       };
-
       resolve(repository);
     };
   });

@@ -86,6 +86,25 @@ describe("IndexedDB repository CRUD", () => {
     await expect(repository.addSource(withEmptySource.id, 2, { title: "Bad", text: null } as never)).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
   });
 
+  it("invalidates only tasks citing a source when its title changes", async () => {
+    const repository = trackRepository(await openRepository(...Object.values(freshDatabase()) as [string, IDBFactory]));
+    const handover = await createdHandover(repository);
+    const first = await repository.addSource(handover.id, 1, { title: "First", text: "ACTION: First task" });
+    const second = await repository.addSource(first.id, 2, { title: "Second", text: "ACTION: Second task" });
+    const firstTask = await repository.addTask(second.id, 3, {
+      title: "First task", citations: [{ sourceId: first.sources[0].id, sourceRevision: 1, quote: "First task" }],
+    });
+    const secondTask = await repository.addTask(firstTask.id, 4, {
+      title: "Second task", citations: [{ sourceId: second.sources[1].id, sourceRevision: 1, quote: "Second task" }],
+    });
+    const approvedFirst = await repository.reviewTask(secondTask.id, secondTask.tasks[0].id, 5, "approved");
+    const approvedBoth = await repository.reviewTask(approvedFirst.id, approvedFirst.tasks[1].id, 6, "approved");
+    const edited = await repository.updateSource(approvedBoth.id, first.sources[0].id, 7, { title: "Renamed" });
+
+    expect(edited.tasks[0]).toMatchObject({ state: "draft", reviewedAt: null });
+    expect(edited.tasks[1]).toMatchObject({ state: "approved" });
+  });
+
   it("performs task CRUD and does not duplicate an accepted stable deterministic suggestion after manual editing", async () => {
     const repository = trackRepository(await openRepository(...Object.values(freshDatabase()) as [string, IDBFactory]));
     const handover = await createdHandover(repository);

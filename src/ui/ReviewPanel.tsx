@@ -121,7 +121,9 @@ export function ReviewPanel({
               <dd>{source?.sha256 ?? "Missing source digest"}</dd>
               <dt>Excerpt hash</dt>
               <dd>
-                {excerptHashes[citation.quote] ?? "Calculating excerpt digest…"}
+                {Object.hasOwn(excerptHashes, citation.quote)
+                  ? excerptHashes[citation.quote]
+                  : "Calculating excerpt digest…"}
               </dd>
             </dl>
           );

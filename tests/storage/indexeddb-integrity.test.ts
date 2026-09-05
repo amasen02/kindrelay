@@ -77,6 +77,20 @@ async function imported(id: string, at: string): Promise<ImportResult> {
 }
 
 describe("IndexedDB integrity boundaries", () => {
+  it("closes a late successful handle after a blocked open has already rejected", async () => {
+    const request = {} as IDBOpenDBRequest;
+    const database = { close: vi.fn() } as unknown as IDBDatabase;
+    const factory = { open: vi.fn(() => request) } as unknown as IDBFactory;
+    const pending = openRepository("blocked-open", factory);
+
+    request.onblocked!(new Event("blocked") as IDBVersionChangeEvent);
+    await expect(pending).rejects.toMatchObject({ code: "STORAGE_ERROR" });
+    Object.defineProperty(request, "result", { value: database });
+    request.onsuccess!(new Event("success") as Event);
+
+    expect(database.close).toHaveBeenCalledOnce();
+  });
+
   it("closes the old repository handle when a version change arrives", async () => {
     const { name, factory } = freshDatabase();
     const repository = trackRepository(await openRepository(name, factory));
@@ -118,10 +132,6 @@ describe("IndexedDB integrity boundaries", () => {
     await expect(repository.getHandover(handover.id)).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
     await expect(repository.listHandovers()).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
 
-    const clean = trackRepository(await openRepository(...Object.values(freshDatabase()) as [string, IDBFactory]));
-    const valid = await createdHandover(clean);
-    const rawClean = await rawDatabase(factory, name);
-    rawClean.close();
     const second = freshDatabase();
     const secondRepository = trackRepository(await openRepository(second.name, second.factory));
     const secondHandover = await createdHandover(secondRepository);
@@ -129,7 +139,6 @@ describe("IndexedDB integrity boundaries", () => {
     await rawPut(rawSecond, "importRecords", { handoverId: secondHandover.id, foreignReview: "bad", foreignSources: [] });
     rawSecond.close();
     await expect(secondRepository.getImportRecord(secondHandover.id)).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
-    void valid;
   });
 
   it("snapshots import input across deferred hashing and deletes both workspace stores", async () => {
@@ -157,5 +166,39 @@ describe("IndexedDB integrity boundaries", () => {
     await repository.deleteHandover(stored.id, 1);
     await expect(repository.getHandover(stored.id)).resolves.toBeNull();
     await expect(repository.getImportRecord(stored.id)).resolves.toBeNull();
+  });
+
+  it("detects a delete CAS conflict written after its readonly snapshot", async () => {
+    const { name, factory } = freshDatabase();
+    const repository = trackRepository(await openRepository(name, factory));
+    const seed = await createdHandover(repository);
+    const packet = await imported("delete-race", seed.createdAt);
+    const stored = await repository.commitImport(packet);
+    const raw = await rawDatabase(factory, name);
+    const raced = structuredClone(stored);
+    raced.revision = 2;
+    raced.updatedAt = new Date(Date.parse(stored.updatedAt) + 1).toISOString();
+    raced.events.push({ id: "delete-race-conflict-event", at: raced.updatedAt, kind: "edited", detail: "{}" });
+    const originalTransaction = IDBDatabase.prototype.transaction;
+    let interleavingReached = false;
+    const spy = vi.spyOn(IDBDatabase.prototype, "transaction").mockImplementation(function (this: IDBDatabase, ...args) {
+      const transaction = originalTransaction.apply(this, args);
+      if (!interleavingReached && args[1] === "readonly") {
+        transaction.addEventListener("complete", () => {
+          interleavingReached = true;
+          raw.transaction(["handovers"], "readwrite").objectStore("handovers").put(raced);
+        });
+      }
+      return transaction;
+    });
+
+    await expect(repository.deleteHandover(stored.id, 1)).rejects.toMatchObject({
+      code: "REVISION_CONFLICT", expectedRevision: 1, actualRevision: 2,
+    });
+    expect(interleavingReached).toBe(true);
+    await expect(repository.getHandover(stored.id)).resolves.toMatchObject({ revision: 2 });
+    await expect(repository.getImportRecord(stored.id)).resolves.toEqual(expect.objectContaining({ handoverId: stored.id }));
+    raw.close();
+    spy.mockRestore();
   });
 });

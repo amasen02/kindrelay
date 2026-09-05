@@ -14,11 +14,17 @@ export class QuotaError extends Error {
 }
 export class RevisionConflictError extends Error {
   readonly code = "REVISION_CONFLICT";
+  readonly expectedRevision?: number;
+  readonly actualRevision?: number;
   constructor(
     message = "This handover changed elsewhere; reload before saving.",
+    expectedRevision?: number,
+    actualRevision?: number,
   ) {
     super(message);
     this.name = "RevisionConflictError";
+    this.expectedRevision = expectedRevision;
+    this.actualRevision = actualRevision;
   }
 }
 export class NotFoundError extends Error {
@@ -28,3 +34,11 @@ export class NotFoundError extends Error {
     this.name = "NotFoundError";
   }
 }
+export class StorageError extends Error {
+  readonly code = "STORAGE_ERROR";
+  constructor(message = "A storage error occurred.") {
+    super(message);
+    this.name = "StorageError";
+  }
+}
+

@@ -135,7 +135,7 @@ describe("KindRelay workspace editor", () => {
     await user.click(screen.getByRole("button", { name: "Add citation" }));
     await user.click(screen.getByRole("button", { name: "Add task" }));
 
-    await screen.findByText("Return laptop");
+    await screen.findByRole("button", { name: "Edit task Return laptop" });
     await user.click(
       screen.getByRole("button", { name: "Edit task Return laptop" }),
     );

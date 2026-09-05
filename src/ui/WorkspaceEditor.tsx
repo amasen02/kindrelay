@@ -4,6 +4,8 @@ import { RevisionConflictError } from "../domain/errors";
 import type { AppServices } from "./types";
 import { SourceEditor } from "./SourceEditor";
 import { TaskEditor } from "./TaskEditor";
+import { ReviewPanel } from "./ReviewPanel";
+import { TransferPanel } from "./TransferPanel";
 
 type Props = {
   services: AppServices;
@@ -208,6 +210,19 @@ export function WorkspaceEditor({
           ))}
         </ul>
       </section>
+      <ReviewPanel
+        handover={handover}
+        services={services}
+        pending={pending}
+        commit={commit}
+        onReturnToEditor={() => document.getElementById("tasks")?.focus()}
+      />
+      <TransferPanel
+        handover={handover}
+        services={services}
+        pending={pending}
+        commit={commit}
+      />
     </main>
   );
 }

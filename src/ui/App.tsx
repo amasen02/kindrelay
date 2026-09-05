@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { Handover } from "../domain/types";
 import { WorkspaceEditor } from "./WorkspaceEditor";
+import { TransferPanel } from "./TransferPanel";
 import type { AppServices } from "./types";
 
 export type { AppServices } from "./types";
@@ -65,10 +66,27 @@ export function App({ services }: { services: AppServices }) {
       setBusy(false);
     }
   };
+  const importWorkspace = async (operation: () => Promise<Handover>) => {
+    if (busy) return false;
+    setBusy(true);
+    setError(null);
+    try {
+      const imported = await operation();
+      setCurrent(imported);
+      await refresh();
+      return true;
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Unable to restore workspace.");
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
   if (current)
     return (
       <>
         <WorkspaceEditor
+          key={current.id}
           services={services}
           handover={current}
           onChange={(next) => {
@@ -147,6 +165,11 @@ export function App({ services }: { services: AppServices }) {
           </ul>
         )}
       </section>
+      <TransferPanel
+        services={services}
+        pending={busy}
+        commit={importWorkspace}
+      />
     </main>
   );
 }

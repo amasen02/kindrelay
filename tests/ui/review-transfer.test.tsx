@@ -105,6 +105,105 @@ afterEach(() => {
 });
 
 describe("KindRelay review and transfer", () => {
+  it("explains that a full-source hash is provenance, while an excerpt hash covers only the quote", async () => {
+    const { user, seeded: workspace } = await renderApp(makeReviewableWorkspace);
+    await openWorkspace(user, workspace.title);
+    const review = screen.getByRole("region", { name: "Review tasks" });
+    expect(within(review).getByText(/full-source hash.*provenance.*not.*authenticity/i)).toBeVisible();
+    expect(within(review).getByText(/excerpt hash.*quote only/i)).toBeVisible();
+  });
+
+  it("moves focus to the preview, restored workspace, and task editor repair target", async () => {
+    const bytes = await shareBytesFromSeparateWorkspace();
+    const { user, seeded: workspace } = await renderApp(makeReviewableWorkspace);
+    await openWorkspace(user, workspace.title);
+    await upload(user, bytes);
+    await screen.findByText(/approvals reset to drafts/i);
+    expect(screen.getByText(/Preview:/i)).toHaveFocus();
+    await user.click(screen.getByRole("checkbox", { name: /acknowledge.*restore/i }));
+    await user.click(screen.getByRole("button", { name: "Restore as new workspace" }));
+    expect(await screen.findByRole("heading", { name: "Imported handover" })).toHaveFocus();
+  });
+
+  it("focuses the actual task editor heading when citation repair returns to the editor", async () => {
+    const { user, repository: repo, seeded: workspace } = await renderApp(makeReviewableWorkspace);
+    await repo.updateSource(workspace.id, workspace.sources[0].id, workspace.revision, { text: "Changed source" });
+    await openWorkspace(user, workspace.title);
+    const review = screen.getByRole("region", { name: "Review tasks" });
+    await user.click(within(review).getByRole("button", { name: "Return to editor" }));
+    expect(screen.getByRole("heading", { name: "Tasks" })).toHaveFocus();
+  });
+
+  it("locks empty-app creation and active navigation while the real import codec is deferred", async () => {
+    const bytes = await shareBytesFromSeparateWorkspace();
+    const { user } = await renderApp(async () => undefined);
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const realImport = packetCodec.importPacket;
+    vi.spyOn(packetCodec, "importPacket").mockImplementationOnce(async (...args) => { await gate; return realImport(...args); });
+    await upload(user, bytes);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Create workspace" })).toBeDisabled());
+    release!();
+    await screen.findByText(/approvals reset to drafts/i);
+  });
+
+  it("prevents duplicate restore and back navigation while real commitImport is deferred", async () => {
+    const bytes = await shareBytesFromSeparateWorkspace();
+    const { user, repository: repo } = await renderApp(async () => undefined);
+    await upload(user, bytes);
+    await screen.findByText(/approvals reset to drafts/i);
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const realCommit = repo.commitImport.bind(repo);
+    const commit = vi.spyOn(repo, "commitImport").mockImplementationOnce(async (...args) => { await gate; return realCommit(...args); });
+    await user.click(screen.getByRole("checkbox", { name: /acknowledge.*restore/i }));
+    const restore = screen.getByRole("button", { name: "Restore as new workspace" });
+    await user.click(restore);
+    expect(restore).toBeDisabled();
+    await user.click(restore);
+    expect(commit).toHaveBeenCalledTimes(1);
+    release!();
+    await screen.findByRole("heading", { name: "Imported handover" });
+  });
+
+  it("clears an earlier valid preview and acknowledgement when a replacement file is invalid", async () => {
+    const bytes = await shareBytesFromSeparateWorkspace();
+    const { user } = await renderApp(async () => undefined);
+    await upload(user, bytes);
+    await screen.findByText(/approvals reset to drafts/i);
+    await user.click(screen.getByRole("checkbox", { name: /acknowledge.*restore/i }));
+    await upload(user, "not JSON", "invalid.json");
+    expect(screen.queryByRole("button", { name: "Restore as new workspace" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: /acknowledge.*restore/i })).not.toBeInTheDocument();
+  });
+
+  it("uses fresh, separate share and private acknowledgements after a revision change and failed download", async () => {
+    const { user, repository: repo, seeded: workspace } = await renderApp(makeReviewableWorkspace);
+    const approved = await repo.reviewTask(workspace.id, workspace.tasks[0].id, workspace.revision, "approved");
+    await openWorkspace(user, approved.title);
+    const transfer = screen.getByRole("region", { name: "Transfer workspace" });
+    await user.click(within(transfer).getByRole("checkbox", { name: /select.*arrange/i }));
+    const share = within(transfer).getByRole("checkbox", { name: /acknowledge.*share/i });
+    const privateAck = within(transfer).getByRole("checkbox", { name: /acknowledge.*private/i });
+    await user.click(share);
+    expect(privateAck).not.toBeChecked();
+    await user.click(privateAck);
+    vi.stubGlobal("URL", { createObjectURL: vi.fn(() => "blob:failed"), revokeObjectURL: vi.fn() });
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => { throw new Error("download blocked"); });
+    await user.click(within(transfer).getByRole("button", { name: "Download private backup" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/download blocked/i);
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:failed");
+    expect(privateAck).not.toBeChecked();
+    expect(share).toBeChecked();
+    await user.clear(screen.getByLabelText("Organization"));
+    await user.type(screen.getByLabelText("Organization"), "Changed");
+    await user.click(screen.getByRole("button", { name: "Save workspace details" }));
+    await screen.findByText("Workspace details saved");
+    const currentTransfer = screen.getByRole("region", { name: "Transfer workspace" });
+    expect(within(currentTransfer).getByRole("checkbox", { name: /acknowledge.*share/i })).not.toBeChecked();
+    expect(within(currentTransfer).getByRole("checkbox", { name: /acknowledge.*private/i })).not.toBeChecked();
+  });
+
   it("shares the editor pending lane while a real export is preparing", async () => {
     const { user, repository: repo, seeded: workspace } = await renderApp(makeReviewableWorkspace);
     const approved = await repo.reviewTask(workspace.id, workspace.tasks[0].id, workspace.revision, "approved");
@@ -162,7 +261,7 @@ describe("KindRelay review and transfer", () => {
     expect(await within(review).findByText(await sha256Utf8("Return the shared laptop"))).toBeVisible();
     expect(within(review).getByText(/exact quote/i)).toBeVisible();
     expect(within(review).getByText(/source revision/i)).toBeVisible();
-    expect(within(review).getByText(/provenance/i)).toBeVisible();
+    expect(within(review).getByText("Provenance", { exact: true })).toBeVisible();
     expect(within(review).getByText(/review time/i)).toBeVisible();
     expect(within(review).getByText(/gap: missing owner/i)).toBeVisible();
     expect(within(review).getByText(/gap: missing date/i)).toBeVisible();

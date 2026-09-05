@@ -72,6 +72,9 @@ export function ReviewPanel({ handover, services, pending, commit, onReturnToEdi
             <dt>Excerpt hash</dt><dd>{excerptHashes[citation.quote] ?? "Calculating excerpt digest…"}</dd>
           </dl>;
         })}
+        <p>
+          The full-source hash is provenance metadata, not proof of excerpt authenticity. The excerpt hash covers this quote only.
+        </p>
         {invalidCitation && <><p>Citation no longer matches the current source.</p><button disabled={pending} onClick={onReturnToEditor}>Return to editor</button></>}
       </article>
       <ul>{gaps.filter((gap) => gap.taskId === task.id).map((gap) => <li key={gap.kind}>Gap: {gap.kind.replace("-", " ")} — {gap.message}</li>)}</ul>

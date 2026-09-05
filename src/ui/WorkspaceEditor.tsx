@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Handover } from "../domain/types";
 import { RevisionConflictError } from "../domain/errors";
 import type { AppServices } from "./types";
@@ -24,6 +24,7 @@ export function WorkspaceEditor({
   onChange,
   onBack,
 }: Props) {
+  const workspaceHeading = useRef<HTMLHeadingElement>(null);
   const [title, setTitle] = useState(handover.title);
   const [organization, setOrganization] = useState(handover.organization);
   const [pending, setPending] = useState(false);
@@ -31,6 +32,7 @@ export function WorkspaceEditor({
   const [error, setError] = useState("");
   const [conflict, setConflict] = useState(false);
   const [reloadVersion, setReloadVersion] = useState(0);
+  useEffect(() => { workspaceHeading.current?.focus(); }, [handover.id]);
   const suggestions = useMemo(
     () =>
       handover.sources
@@ -114,7 +116,7 @@ export function WorkspaceEditor({
           Back to workspaces
         </button>
         <div>
-          <h1>{handover.title}</h1>
+          <h1 ref={workspaceHeading} tabIndex={-1}>{handover.title}</h1>
           <p>Local browser storage is not encrypted.</p>
         </div>
       </header>

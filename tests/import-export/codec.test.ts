@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   exportApproved,
   exportPrivateBackup,
@@ -63,6 +63,36 @@ describe("PacketCodec approved exports", () => {
     await expect(exportApproved(handover, "json", ["missing-task"])).rejects.toThrow();
     await expect(exportApproved(handover, "json", [draft.id])).rejects.toThrow();
     await expect(exportApproved(handover, "json", [rejected.id])).rejects.toThrow();
+  });
+
+  it("snapshots selected IDs before deferred source hashing can observe a caller mutation", async () => {
+    const fixture = await populatedRepository();
+    repositories.push(fixture.repository);
+    const handover = (await fixture.repository.getHandover(fixture.handoverId))!;
+    const selectedIds = [fixture.approvedTaskId];
+    const draftId = handover.tasks.find((task) => task.state === "draft")!.id;
+    const actualDigest = crypto.subtle.digest.bind(crypto.subtle);
+    let releaseHash!: () => void;
+    const hashGate = new Promise<void>((resolve) => {
+      releaseHash = resolve;
+    });
+    const digest = vi.spyOn(crypto.subtle, "digest").mockImplementation(
+      async (algorithm, data) => {
+        await hashGate;
+        return actualDigest(algorithm, data);
+      },
+    );
+
+    try {
+      const exported = exportApproved(handover, "json", selectedIds);
+      selectedIds[0] = draftId;
+      releaseHash();
+      await expect(exported).resolves.toMatchObject({
+        tasks: [expect.objectContaining({ id: fixture.approvedTaskId })],
+      });
+    } finally {
+      digest.mockRestore();
+    }
   });
 
   it("renders a readable inert Markdown artifact with provenance, review, owner, and date", async () => {
@@ -158,6 +188,20 @@ describe("PacketCodec imports", () => {
     const reopened = await openRepository(fixture.name, fixture.factory);
     repositories.push(reopened);
     await expect(reopened.getHandover(committed.id)).resolves.toEqual(committed);
+    await expect(reopened.getImportRecord(committed.id)).resolves.toMatchObject({
+      foreignReview: expect.arrayContaining(
+        restored.foreignReview.map((record) => expect.objectContaining({ taskId: record.taskId })),
+      ),
+      foreignSources: expect.arrayContaining(
+        restored.foreignSources.map((record) => expect.objectContaining({ localSourceId: record.localSourceId })),
+      ),
+    });
+    expect(new Set(restored.foreignReview.map((record) => record.taskId)).size).toBe(
+      restored.handover.tasks.length,
+    );
+    expect(new Set(restored.foreignSources.map((record) => record.localSourceId)).size).toBe(
+      restored.handover.sources.length,
+    );
   });
 
   it("preserves stale draft citation revisions while remapping every source and task ID in a real private restore", async () => {

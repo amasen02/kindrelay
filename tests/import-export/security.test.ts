@@ -312,6 +312,57 @@ describe("PacketCodec limits", () => {
     }
   });
 
+  it("refuses a valid under-1-MiB share when 50 imported excerpt sources would exceed the 8 MiB destination", async () => {
+    const fixture = await populatedRepository();
+    try {
+      let handover = (await fixture.repository.getHandover(fixture.handoverId))!;
+      const sourceTitle = "t".repeat(200_000);
+      const quoteText = Array.from({ length: 50 }, (_, index) => `budget-${index}`).join("\n");
+      handover = await fixture.repository.addSource(handover.id, handover.revision, {
+        title: sourceTitle,
+        text: quoteText,
+      });
+      const source = handover.sources.at(-1)!;
+      const taskIds: string[] = [];
+      for (let index = 0; index < 50; index += 1) {
+        handover = await fixture.repository.addTask(handover.id, handover.revision, {
+          title: `Budget task ${index}`,
+          citations: [{
+            sourceId: source.id,
+            sourceRevision: source.revision,
+            quote: `budget-${index}`,
+          }],
+        });
+        const task = handover.tasks.at(-1)!;
+        handover = await fixture.repository.reviewTask(handover.id, task.id, handover.revision, "approved");
+        taskIds.push(task.id);
+      }
+
+      const smaller = await exportApproved(handover, "json", taskIds.slice(0, 4));
+      expect(new TextEncoder().encode(JSON.stringify(smaller)).byteLength).toBeLessThan(1024 * 1024);
+      const smallerImported = await importPacket(JSON.stringify(smaller));
+      expect(smallerImported.handover.sources).toHaveLength(4);
+
+      const wouldBeFull = clonePacket(smaller);
+      wouldBeFull.tasks = await Promise.all(taskIds.map(async (taskId) => {
+        const task = handover.tasks.find((candidate) => candidate.id === taskId)!;
+        return {
+          ...task,
+          citations: await Promise.all(task.citations.map(async (citation) => ({
+            ...citation,
+            excerptSha256: await sha256Utf8(citation.quote),
+          }))),
+        };
+      }));
+      expect(new TextEncoder().encode(JSON.stringify(wouldBeFull)).byteLength).toBeLessThan(1024 * 1024);
+      await expect(exportApproved(handover, "json", taskIds)).rejects.toThrow(
+        /destination exceeds 8 MiB; select fewer/i,
+      );
+    } finally {
+      fixture.repository.close();
+    }
+  });
+
   it("keeps equal excerpt text distinct when the original source provenance differs", async () => {
     const fixture = await populatedRepository();
     try {

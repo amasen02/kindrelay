@@ -24,6 +24,7 @@ import {
 } from "./schema";
 
 const SHARE_LIMIT = 1024 * 1024;
+const DESTINATION_LIMIT = 8 * 1024 * 1024;
 const PRIVATE_WARNING = "Private backup: contains the complete local workspace and may include sensitive notes.";
 const SHARE_WARNING = "Share only with recipients authorized to receive approved task excerpts and provenance metadata.";
 
@@ -31,6 +32,9 @@ const fail = (message: string): never => {
   throw new ValidationError(message);
 };
 const now = () => new Date().toISOString();
+
+const projectionId = (index: number) =>
+  `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`;
 
 async function verifiedHandover(value: Handover): Promise<Handover> {
   const snapshot = validateHandover(value);
@@ -95,7 +99,64 @@ async function makeSharePacket(
   };
   if (utf8Size(JSON.stringify(packet)) > SHARE_LIMIT)
     fail("Share packet exceeds 1 MiB; select fewer items.");
+  assertDestinationBudget(packet);
   return packet;
+}
+
+function assertDestinationBudget(packet: ExportPacket): void {
+  const importedSources = new Map<string, Source>();
+  for (const task of packet.tasks) {
+    for (const citation of task.citations) {
+      const key = tupleKey(
+        citation.sourceId,
+        citation.sourceRevision,
+        citation.quote,
+      );
+      if (importedSources.has(key)) continue;
+      const source = packet.sources.find((item) => item.id === citation.sourceId)!;
+      importedSources.set(key, {
+        id: projectionId(importedSources.size),
+        title: source.title,
+        text: citation.quote,
+        sha256: citation.excerptSha256,
+        revision: 1,
+      });
+    }
+  }
+  const sourcesByTuple = [...importedSources.entries()];
+  const destination = {
+    id: projectionId(500),
+    title: "Imported handover",
+    organization: "Imported workspace",
+    createdAt: "2000-01-01T00:00:00.000Z",
+    updatedAt: "2000-01-01T00:00:00.000Z",
+    sources: sourcesByTuple.map(([, source]) => source),
+    tasks: packet.tasks.map((task, index) => ({
+      id: projectionId(600 + index),
+      title: task.title,
+      owner: task.owner,
+      dueDate: task.dueDate,
+      state: "draft" as const,
+      citations: task.citations.map((citation) => ({
+        sourceId: importedSources.get(
+          tupleKey(citation.sourceId, citation.sourceRevision, citation.quote),
+        )!.id,
+        sourceRevision: 1,
+        quote: citation.quote,
+      })),
+      reviewedAt: null,
+      provenance: "imported" as const,
+    })),
+    events: [{
+      id: projectionId(1_200),
+      at: "2000-01-01T00:00:00.000Z",
+      kind: "imported" as const,
+      detail: JSON.stringify({ action: "imported" }),
+    }],
+    revision: 1,
+  };
+  if (utf8Size(JSON.stringify(destination)) > DESTINATION_LIMIT)
+    fail("Import destination exceeds 8 MiB; select fewer items.");
 }
 
 export async function exportApproved(

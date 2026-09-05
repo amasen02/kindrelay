@@ -30,6 +30,13 @@ const nextRevision = (n: number): number => {
 const eventDetail = (kind: string, ids: Record<string, string>): string =>
   JSON.stringify({ action: kind, ...ids });
 const assertKeys = (value: object, allowed: readonly string[], name: string): void => {
+  if (
+    value === null ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    !([Object.prototype, null] as unknown[]).includes(Object.getPrototypeOf(value))
+  )
+    fail(`${name} must be a plain object.`);
   for (const key of Object.keys(value))
     if (!allowed.includes(key)) fail(`${name} contains unknown field ${key}.`);
 };
@@ -81,11 +88,19 @@ export function applyMutation(
     case "update-handover": {
       const patch = command.patch;
       assertKeys(patch, ["title", "organization"], "handover patch");
-      const title = patch.title ?? result.title;
-      const organization = patch.organization ?? result.organization;
+      const patchValues = patch as Record<string, unknown>;
+      const title = Object.prototype.hasOwnProperty.call(patch, "title")
+        ? patchValues.title
+        : result.title;
+      const organization = Object.prototype.hasOwnProperty.call(
+        patch,
+        "organization",
+      )
+        ? patchValues.organization
+        : result.organization;
       if (title === result.title && organization === result.organization) return handover;
-      result.title = title;
-      result.organization = organization;
+      result.title = title as string;
+      result.organization = organization as string;
       return finish(original, result, context, command.kind, { handoverId: handover.id });
     }
     case "add-source": {

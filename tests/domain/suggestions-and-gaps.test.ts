@@ -13,6 +13,10 @@ describe("deterministic suggestions", () => {
     const s = source({ id: "a", revision: 3, text: "TODO: Same\n\nTODO: Same" });
     const first = suggest(s); const second = suggest(s);
     expect(first).toEqual(second); expect(first[0].id).not.toBe(first[1].id);
+    expect(first.map((item) => item.id)).toEqual([
+      'suggestion:["a",3,0]',
+      'suggestion:["a",3,2]',
+    ]);
     expect(first[0].citations[0]).toEqual({ sourceId: "a", sourceRevision: 3, quote: "Same" });
     expect(suggest({ ...s, revision: 4 })[0].id).not.toBe(first[0].id);
   });

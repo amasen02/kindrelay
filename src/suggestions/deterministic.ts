@@ -8,6 +8,23 @@ export function suggest(source: Source): ReadonlyArray<UnreviewedSuggestion> {
     if (!prefix) return [];
     const title = candidate.slice(prefix.length).trim();
     if (!title) return [];
-    return [{ id: `suggestion:${JSON.stringify([source.id, source.revision, lineIndex])}`, title, owner: null, dueDate: null, citations: [{ sourceId: source.id, sourceRevision: source.revision, quote: title }], state: "draft", reviewedAt: null, provenance: "deterministic-suggestion" }];
+    return [
+      {
+        id: `suggestion:${JSON.stringify([source.id, source.revision, lineIndex])}`,
+        title,
+        owner: null,
+        dueDate: null,
+        citations: [
+          {
+            sourceId: source.id,
+            sourceRevision: source.revision,
+            quote: title,
+          },
+        ],
+        state: "draft",
+        reviewedAt: null,
+        provenance: "deterministic-suggestion",
+      },
+    ];
   });
 }

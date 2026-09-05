@@ -1,1 +1,14 @@
-:root { font-family: system-ui, sans-serif; color: #223; background: #f7f7f4; } main { max-width: 60rem; margin: 10vh auto; padding: 2rem; background: white; } :focus-visible { outline: 3px solid #157; }
+:root {
+  font-family: system-ui, sans-serif;
+  color: #223;
+  background: #f7f7f4;
+}
+main {
+  max-width: 60rem;
+  margin: 10vh auto;
+  padding: 2rem;
+  background: white;
+}
+:focus-visible {
+  outline: 3px solid #157;
+}

@@ -12,6 +12,14 @@ function rawDatabase(factory: IDBFactory, name: string): Promise<IDBDatabase> {
   });
 }
 
+function upgradeDatabase(factory: IDBFactory, name: string): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const request = factory.open(name, 2);
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
 function rawPut(
   database: IDBDatabase,
   store: string,
@@ -69,6 +77,16 @@ async function imported(id: string, at: string): Promise<ImportResult> {
 }
 
 describe("IndexedDB integrity boundaries", () => {
+  it("closes the old repository handle when a version change arrives", async () => {
+    const { name, factory } = freshDatabase();
+    const repository = trackRepository(await openRepository(name, factory));
+    const handover = await createdHandover(repository);
+    const upgraded = await upgradeDatabase(factory, name);
+    upgraded.close();
+
+    await expect(repository.getHandover(handover.id)).rejects.toMatchObject({ code: "STORAGE_ERROR" });
+  });
+
   it("rejects every malformed foreign metadata shape before persistence", async () => {
     const repository = trackRepository(await openRepository(...Object.values(freshDatabase()) as [string, IDBFactory]));
     const seed = await createdHandover(repository);

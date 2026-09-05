@@ -98,13 +98,15 @@ describe("applyMutation", () => {
     },
   );
   it("rejects unknown patch keys while preserving an empty no-op", () => {
-    expect(
-      applyMutation(
-        handover(),
-        { kind: "update-handover", patch: {} },
-        at,
-      ),
-    ).toBeDefined();
+    const input = handover();
+    const result = applyMutation(
+      input,
+      { kind: "update-handover", patch: {} },
+      at,
+    );
+    expect(result).toBe(input);
+    expect(result.revision).toBe(input.revision);
+    expect(result.events).toEqual(input.events);
     expect(() =>
       applyMutation(
         handover(),

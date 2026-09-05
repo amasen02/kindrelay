@@ -1,14 +1,158 @@
 :root {
-  font-family: system-ui, sans-serif;
-  color: #223;
-  background: #f7f7f4;
+  --surface: #fff;
+  --canvas: #f3f5f6;
+  --text: #17212b;
+  --muted: #556270;
+  --border: #c8d0d8;
+  --action: #075985;
+  --danger: #a61b1b;
+  --status: #075f46;
+  font-family:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
+  color: var(--text);
+  background: var(--canvas);
 }
-main {
-  max-width: 60rem;
-  margin: 10vh auto;
-  padding: 2rem;
-  background: white;
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+}
+.app-shell {
+  max-width: 70rem;
+  margin: 2rem auto;
+  padding: clamp(1rem, 4vw, 2rem);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+}
+.app-header {
+  display: flex;
+  align-items: start;
+  gap: 1rem;
+  min-width: 0;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 1rem;
+}
+h1,
+h2,
+h3 {
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+h1 {
+  margin: 0;
+}
+h2 {
+  margin-top: 1.75rem;
+}
+p {
+  line-height: 1.5;
+}
+pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+  background: #f6f8fa;
+  padding: 0.75rem;
+  border-radius: 0.25rem;
+}
+section {
+  margin-block: 1.5rem;
+}
+article {
+  border-top: 1px solid var(--border);
+  margin-top: 1rem;
+  padding-top: 1rem;
+}
+fieldset {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-inline-size: 0;
+}
+label {
+  display: grid;
+  gap: 0.35rem;
+  margin-block: 0.7rem;
+  max-width: 42rem;
+}
+input,
+textarea,
+select,
+button {
+  font: inherit;
+}
+input,
+textarea,
+select {
+  width: 100%;
+  padding: 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 0.25rem;
+  background: var(--surface);
+  color: var(--text);
+}
+textarea {
+  min-height: 7rem;
+  resize: vertical;
+}
+button {
+  margin: 0.25rem 0.5rem 0.25rem 0;
+  padding: 0.55rem 0.75rem;
+  border: 1px solid var(--action);
+  border-radius: 0.25rem;
+  background: var(--action);
+  color: white;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+button.danger {
+  background: var(--danger);
+  border-color: var(--danger);
+}
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+[role="alert"] {
+  color: var(--danger);
+  font-weight: 600;
+}
+[role="status"] {
+  color: var(--status);
+  font-weight: 600;
 }
 :focus-visible {
-  outline: 3px solid #157;
+  outline: 3px solid #f59e0b;
+  outline-offset: 2px;
+}
+li {
+  overflow-wrap: anywhere;
+}
+
+article,
+.app-header > div {
+  min-width: 0;
+}
+.app-error {
+  max-width: 70rem;
+  margin: 1rem auto;
+}
+@media (max-width: 375px) {
+  .app-shell {
+    margin: 0;
+    border-radius: 0;
+    border-inline: 0;
+  }
+  .app-header {
+    flex-direction: column;
+  }
+  button {
+    width: 100%;
+    margin-inline: 0;
+  }
 }

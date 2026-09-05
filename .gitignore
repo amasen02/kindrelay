@@ -7,3 +7,6 @@ test-results/
 .env*
 *.pem
 *.key
+*.cookie
+*cookies*.json
+cookies.txt

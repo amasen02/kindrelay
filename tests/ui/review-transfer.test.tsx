@@ -134,22 +134,36 @@ describe("KindRelay review and transfer", () => {
     expect(screen.getByRole("heading", { name: "Tasks" })).toHaveFocus();
   });
 
-  it("locks empty-app creation and active navigation while the real import codec is deferred", async () => {
+  it.each([
+    ["empty app", async () => undefined, false],
+    ["active workspace", makeReviewableWorkspace, true],
+  ])("locks %s navigation while the real import codec is deferred", async (_label, seed, active) => {
     const bytes = await shareBytesFromSeparateWorkspace();
-    const { user } = await renderApp(async () => undefined);
+    const { user } = await renderApp(seed);
+    if (active) await openWorkspace(user, "October handover");
     let release: (() => void) | undefined;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     const realImport = packetCodec.importPacket;
     vi.spyOn(packetCodec, "importPacket").mockImplementationOnce(async (...args) => { await gate; return realImport(...args); });
     await upload(user, bytes);
-    await waitFor(() => expect(screen.getByRole("button", { name: "Create workspace" })).toBeDisabled());
+    await waitFor(() => {
+      if (active) {
+        expect(screen.getByRole("button", { name: "Back to workspaces" })).toBeDisabled();
+      } else {
+        expect(screen.getByRole("button", { name: "Create workspace" })).toBeDisabled();
+      }
+    });
     release!();
     await screen.findByText(/approvals reset to drafts/i);
   });
 
-  it("prevents duplicate restore and back navigation while real commitImport is deferred", async () => {
+  it.each([
+    ["empty app", async () => undefined, false],
+    ["active workspace", makeReviewableWorkspace, true],
+  ])("prevents duplicate restore and %s navigation while real commitImport is deferred", async (_label, seed, active) => {
     const bytes = await shareBytesFromSeparateWorkspace();
-    const { user, repository: repo } = await renderApp(async () => undefined);
+    const { user, repository: repo } = await renderApp(seed);
+    if (active) await openWorkspace(user, "October handover");
     await upload(user, bytes);
     await screen.findByText(/approvals reset to drafts/i);
     let release: (() => void) | undefined;
@@ -160,10 +174,33 @@ describe("KindRelay review and transfer", () => {
     const restore = screen.getByRole("button", { name: "Restore as new workspace" });
     await user.click(restore);
     expect(restore).toBeDisabled();
+    if (active) {
+      expect(screen.getByRole("button", { name: "Back to workspaces" })).toBeDisabled();
+    }
     await user.click(restore);
     expect(commit).toHaveBeenCalledTimes(1);
     release!();
     await screen.findByRole("heading", { name: "Imported handover" });
+  });
+
+  it.each([
+    ["empty app", async () => undefined, false],
+    ["active workspace", makeReviewableWorkspace, true],
+  ])("recovers %s navigation after an injected commitImport failure", async (_label, seed, active) => {
+    const bytes = await shareBytesFromSeparateWorkspace();
+    const { user, repository: repo } = await renderApp(seed);
+    if (active) await openWorkspace(user, "October handover");
+    await upload(user, bytes);
+    await screen.findByText(/approvals reset to drafts/i);
+    vi.spyOn(repo, "commitImport").mockRejectedValueOnce(new Error("restore failed"));
+    await user.click(screen.getByRole("checkbox", { name: /acknowledge.*restore/i }));
+    await user.click(screen.getByRole("button", { name: "Restore as new workspace" }));
+    await expect(screen.findByRole("alert")).resolves.toHaveTextContent(/restore failed/i);
+    if (active) {
+      expect(screen.getByRole("button", { name: "Back to workspaces" })).toBeEnabled();
+    } else {
+      expect(screen.getByRole("button", { name: "Create workspace" })).toBeEnabled();
+    }
   });
 
   it("clears an earlier valid preview and acknowledgement when a replacement file is invalid", async () => {
@@ -173,6 +210,7 @@ describe("KindRelay review and transfer", () => {
     await screen.findByText(/approvals reset to drafts/i);
     await user.click(screen.getByRole("checkbox", { name: /acknowledge.*restore/i }));
     await upload(user, "not JSON", "invalid.json");
+    await screen.findByRole("alert");
     expect(screen.queryByRole("button", { name: "Restore as new workspace" })).not.toBeInTheDocument();
     expect(screen.queryByRole("checkbox", { name: /acknowledge.*restore/i })).not.toBeInTheDocument();
   });
@@ -189,12 +227,20 @@ describe("KindRelay review and transfer", () => {
     expect(privateAck).not.toBeChecked();
     await user.click(privateAck);
     vi.stubGlobal("URL", { createObjectURL: vi.fn(() => "blob:failed"), revokeObjectURL: vi.fn() });
-    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => { throw new Error("download blocked"); });
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+    await user.click(within(transfer).getByRole("button", { name: "Download private backup" }));
+    expect(await screen.findByRole("status")).toHaveTextContent(/download prepared/i);
+    expect(privateAck).not.toBeChecked();
+    await user.click(privateAck);
+    click.mockImplementation(() => { throw new Error("download blocked"); });
     await user.click(within(transfer).getByRole("button", { name: "Download private backup" }));
     expect(await screen.findByRole("alert")).toHaveTextContent(/download blocked/i);
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
     expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:failed");
     expect(privateAck).not.toBeChecked();
     expect(share).toBeChecked();
+    await user.click(privateAck);
+    expect(privateAck).toBeChecked();
     await user.clear(screen.getByLabelText("Organization"));
     await user.type(screen.getByLabelText("Organization"), "Changed");
     await user.click(screen.getByRole("button", { name: "Save workspace details" }));
@@ -479,6 +525,7 @@ describe("KindRelay review and transfer", () => {
     await user.click(screen.getByRole("checkbox", { name: /acknowledge.*restore/i }));
     await user.click(screen.getByRole("button", { name: "Restore as new workspace" }));
     expect(await screen.findByRole("alert")).toHaveTextContent(/storage is full/i);
+    expect(screen.getByRole("checkbox", { name: /acknowledge.*restore/i })).not.toBeChecked();
     expect(await repo.listHandovers()).toHaveLength(1);
 
     const padded = `${valid}${" ".repeat(16 * 1024 * 1024 + 1)}`;

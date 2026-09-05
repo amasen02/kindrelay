@@ -39,7 +39,7 @@ export function SourceEditor({
               title: sourceTitle,
               text: sourceText,
             }),
-      editing ? "Source saved; related approvals need review." : "Source added",
+      editing ? "Source saved" : "Source added",
     );
     if (saved) reset();
   };

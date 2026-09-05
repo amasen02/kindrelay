@@ -629,4 +629,136 @@ describe("KindRelay workspace editor", () => {
       sources: [expect.objectContaining({ title: "Replacement" })],
     });
   });
+
+  it("retains source and task drafts, including a selected citation, after quota failures", async () => {
+    const user = await renderEditor();
+    const workspace = await createAndOpenWorkspace(user);
+    const sourced = await repository.addSource(
+      workspace.id,
+      workspace.revision,
+      { title: "Notes", text: "Quote" },
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Back to workspaces" }),
+    );
+    await user.click(screen.getByRole("button", { name: /October handover/i }));
+    vi.spyOn(repository, "addSource").mockRejectedValueOnce(
+      new QuotaError("No source space."),
+    );
+    await user.type(screen.getByLabelText("Source title"), "Retained source");
+    await user.type(screen.getByLabelText("Source text"), "Retained text");
+    await user.click(screen.getByRole("button", { name: "Add source" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "No source space.",
+    );
+    expect(screen.getByLabelText("Source title")).toHaveValue(
+      "Retained source",
+    );
+    vi.spyOn(repository, "addTask").mockRejectedValueOnce(
+      new QuotaError("No task space."),
+    );
+    await user.type(screen.getByLabelText("Task title"), "Retained task");
+    await user.selectOptions(
+      screen.getByLabelText("Citation source"),
+      sourced.sources[0].id,
+    );
+    await user.type(screen.getByLabelText("Citation quote"), "Quote");
+    await user.click(screen.getByRole("button", { name: "Add citation" }));
+    await user.click(screen.getByRole("button", { name: "Add task" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "No task space.",
+    );
+    expect(screen.getByLabelText("Task title")).toHaveValue("Retained task");
+    expect(screen.getByText(/Quote — Current citation/)).toBeVisible();
+  });
+
+  it("disables back navigation while a save is pending", async () => {
+    const user = await renderEditor();
+    await createAndOpenWorkspace(user);
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const actualSave = repository.updateHandover.bind(repository);
+    vi.spyOn(repository, "updateHandover").mockImplementationOnce(
+      async (...args) => {
+        await gate;
+        return actualSave(...args);
+      },
+    );
+    await user.clear(screen.getByLabelText("Workspace title"));
+    await user.type(screen.getByLabelText("Workspace title"), "Pending");
+    await user.click(
+      screen.getByRole("button", { name: "Save workspace details" }),
+    );
+    expect(
+      screen.getByRole("button", { name: "Back to workspaces" }),
+    ).toBeDisabled();
+    release!();
+    await screen.findByText("Workspace details saved");
+  });
+
+  it("retains all dirty forms when an explicit reload fails", async () => {
+    const user = await renderEditor();
+    const workspace = await createAndOpenWorkspace(user);
+    const otherTab = await openRepository(databaseName, databaseFactory);
+    await otherTab.updateHandover(workspace.id, workspace.revision, {
+      title: "Elsewhere",
+    });
+    await user.type(screen.getByLabelText("Source title"), "Keep source");
+    await user.type(screen.getByLabelText("Task title"), "Keep task");
+    await user.click(
+      screen.getByRole("button", { name: "Save workspace details" }),
+    );
+    await screen.findByRole("button", { name: "Reload saved workspace" });
+    vi.spyOn(repository, "getHandover").mockRejectedValueOnce(
+      new Error("Reload failed."),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Reload saved workspace" }),
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Reload failed.",
+    );
+    expect(screen.getByLabelText("Source title")).toHaveValue("Keep source");
+    expect(screen.getByLabelText("Task title")).toHaveValue("Keep task");
+    otherTab.close();
+  });
+
+  it("resets an editor after deleting its selected task so another task can be created", async () => {
+    const user = await renderEditor();
+    const workspace = await createAndOpenWorkspace(user);
+    const sourced = await repository.addSource(
+      workspace.id,
+      workspace.revision,
+      { title: "Notes", text: "Quote" },
+    );
+    const withTask = await repository.addTask(sourced.id, sourced.revision, {
+      title: "Remove task",
+      citations: [
+        { sourceId: sourced.sources[0].id, sourceRevision: 1, quote: "Quote" },
+      ],
+    });
+    await user.click(
+      screen.getByRole("button", { name: "Back to workspaces" }),
+    );
+    await user.click(screen.getByRole("button", { name: /October handover/i }));
+    await user.click(
+      screen.getByRole("button", { name: "Edit task Remove task" }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Delete task Remove task" }),
+    );
+    await user.type(screen.getByLabelText("Task title"), "Replacement task");
+    await user.selectOptions(
+      screen.getByLabelText("Citation source"),
+      sourced.sources[0].id,
+    );
+    await user.type(screen.getByLabelText("Citation quote"), "Quote");
+    await user.click(screen.getByRole("button", { name: "Add citation" }));
+    await user.click(screen.getByRole("button", { name: "Add task" }));
+    await expect(repository.getHandover(withTask.id)).resolves.toMatchObject({
+      tasks: [expect.objectContaining({ title: "Replacement task" })],
+    });
+  });
 });

@@ -14,16 +14,19 @@ export function App({ services }: { services: AppServices }) {
   const [organization, setOrganization] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
   const refresh = async () =>
     setItems(await services.repository.listHandovers());
   useEffect(() => {
-    void refresh().catch((reason: unknown) =>
-      setError(
-        reason instanceof Error
-          ? reason.message
-          : "Unable to load local workspaces.",
-      ),
-    );
+    void refresh()
+      .catch((reason: unknown) =>
+        setError(
+          reason instanceof Error
+            ? reason.message
+            : "Unable to load local workspaces.",
+        ),
+      )
+      .finally(() => setLoading(false));
   }, [services]);
   const create = async () => {
     setBusy(true);
@@ -109,6 +112,7 @@ export function App({ services }: { services: AppServices }) {
           Workspace title
           <input
             value={title}
+            disabled={busy}
             onChange={(event) => setTitle(event.target.value)}
           />
         </label>
@@ -116,6 +120,7 @@ export function App({ services }: { services: AppServices }) {
           Organization
           <input
             value={organization}
+            disabled={busy}
             onChange={(event) => setOrganization(event.target.value)}
           />
         </label>
@@ -125,7 +130,9 @@ export function App({ services }: { services: AppServices }) {
       </section>
       <section aria-labelledby="workspaces">
         <h2 id="workspaces">Workspaces</h2>
-        {items.length === 0 ? (
+        {loading ? (
+          <p aria-busy="true">Loading local workspaces…</p>
+        ) : items.length === 0 ? (
           <p>No workspaces yet. Create one to record sources and tasks.</p>
         ) : (
           <ul>

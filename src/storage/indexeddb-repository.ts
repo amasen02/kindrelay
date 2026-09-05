@@ -2,7 +2,7 @@ import { sha256Utf8 } from "../domain/hash";
 import { NotFoundError, RevisionConflictError, StorageError, ValidationError } from "../domain/errors";
 import { applyMutation, type PreparedMutation } from "../domain/mutations";
 import { suggest } from "../suggestions/deterministic";
-import type { CreateHandoverInput, CreateSourceInput, CreateTaskInput, ForeignReviewRecord, ForeignSourceRecord, Handover, HandoverId, HandoverPatch, HandoverRepository, HandoverSummary, ImportResult, Revision, Source, SourceId, SourcePatch, Task, TaskId, TaskPatch } from "../domain/types";
+import type { Citation, CreateHandoverInput, CreateSourceInput, CreateTaskInput, ForeignReviewRecord, ForeignSourceRecord, Handover, HandoverId, HandoverPatch, HandoverRepository, HandoverSummary, ImportResult, Revision, Source, SourceId, SourcePatch, Task, TaskId, TaskPatch } from "../domain/types";
 import { validateHandover, validateSourceText } from "../domain/validation";
 import { DB_VERSION, STORE_HANDOVERS, STORE_IMPORT_RECORDS } from "./schema";
 import { failOnRequestError, mapStorageError, runTransaction } from "./transactions";
@@ -41,6 +41,10 @@ function nullable(value: unknown, label: string): string | null {
   if (value !== null && typeof value !== "string") invalid(label + " must be a string or null.");
   return value as string | null;
 }
+function string(value: unknown, label: string): string {
+  if (typeof value !== "string") invalid(label + " must be a string.");
+  return value as string;
+}
 function revision(value: unknown, label: string): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) invalid(label + " must be a positive safe integer.");
   return value as number;
@@ -55,7 +59,9 @@ function date(value: unknown, label: string): string {
 }
 function timestamp(value: unknown, label: string): string {
   const result = nonempty(value, label);
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(result) || new Date(result).toISOString() !== result) invalid(label + " must be an ISO UTC timestamp.");
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(result)) invalid(label + " must be an ISO UTC timestamp.");
+  const parsed = Date.parse(result);
+  if (Number.isNaN(parsed) || new Date(parsed).toISOString() !== result) invalid(label + " must be an ISO UTC timestamp.");
   return result;
 }
 function hash(value: unknown, label: string): string {
@@ -69,7 +75,7 @@ function handoverInput(value: unknown): CreateHandoverInput {
 }
 function sourceInput(value: unknown): CreateSourceInput {
   const input = exact(value, ["title", "text"], "CreateSourceInput");
-  const text = nonempty(input.text, "CreateSourceInput.text"); validateSourceText(text);
+  const text = string(input.text, "CreateSourceInput.text"); validateSourceText(text);
   return { title: nonempty(input.title, "CreateSourceInput.title"), text };
 }
 function hPatch(value: unknown): HandoverPatch {
@@ -81,15 +87,25 @@ function hPatch(value: unknown): HandoverPatch {
 function sPatch(value: unknown): SourcePatch {
   const input = exact(value, ["title", "text"], "SourcePatch"); const result: SourcePatch = {};
   if (own(input, "title")) result.title = nonempty(input.title, "SourcePatch.title");
-  if (own(input, "text")) { result.text = nonempty(input.text, "SourcePatch.text"); validateSourceText(result.text); }
+  if (own(input, "text")) { result.text = string(input.text, "SourcePatch.text"); validateSourceText(result.text); }
   return result;
+}
+function citations(value: unknown, label: string): Citation[] {
+  if (!Array.isArray(value)) invalid(label + " must be an array.");
+  return (value as unknown[]).map((value) => {
+    const citation = exact(value, ["sourceId", "sourceRevision", "quote"], "citation");
+    return {
+      sourceId: nonempty(citation.sourceId, "citation.sourceId"),
+      sourceRevision: revision(citation.sourceRevision, "citation.sourceRevision"),
+      quote: nonempty(citation.quote, "citation.quote"),
+    };
+  });
 }
 function tInput(value: unknown): CreateTaskInput {
   const input = exact(value, ["title", "owner", "dueDate", "citations", "provenance"], "CreateTaskInput");
   const provenance = own(input, "provenance") ? input.provenance : "manual";
-  if (provenance !== "manual" && provenance !== "deterministic-suggestion") invalid("CreateTaskInput.provenance is invalid.");
-  if (!Array.isArray(input.citations)) invalid("CreateTaskInput.citations must be an array.");
-  const result: CreateTaskInput = { title: nonempty(input.title, "CreateTaskInput.title"), citations: clone(input.citations, "CreateTaskInput.citations") as CreateTaskInput["citations"], provenance: provenance as CreateTaskInput["provenance"] };
+  if (provenance !== "manual" && provenance !== "deterministic-suggestion" && provenance !== "imported") invalid("CreateTaskInput.provenance is invalid.");
+  const result: CreateTaskInput = { title: nonempty(input.title, "CreateTaskInput.title"), citations: citations(input.citations, "CreateTaskInput.citations"), provenance: provenance as CreateTaskInput["provenance"] };
   if (own(input, "owner")) result.owner = nullable(input.owner, "CreateTaskInput.owner");
   if (own(input, "dueDate")) result.dueDate = input.dueDate === null ? null : date(input.dueDate, "CreateTaskInput.dueDate");
   return result;
@@ -99,7 +115,7 @@ function tPatch(value: unknown): TaskPatch {
   if (own(input, "title")) result.title = nonempty(input.title, "TaskPatch.title");
   if (own(input, "owner")) result.owner = nullable(input.owner, "TaskPatch.owner");
   if (own(input, "dueDate")) result.dueDate = input.dueDate === null ? null : date(input.dueDate, "TaskPatch.dueDate");
-  if (own(input, "citations")) { if (!Array.isArray(input.citations)) invalid("TaskPatch.citations must be an array."); result.citations = clone(input.citations, "TaskPatch.citations") as TaskPatch["citations"]; }
+  if (own(input, "citations")) result.citations = citations(input.citations, "TaskPatch.citations");
   return result;
 }
 function metadata(value: unknown, handover: Handover): ImportRecord {
@@ -184,7 +200,7 @@ export function openRepository(name: string, factory: IDBFactory = globalThis.in
       const repository: Repository = {
         close: () => db.close(),
         async createHandover(input) {
-          const prepared = handoverInput(clone(input, "CreateHandoverInput")); const at = now();
+          const prepared = clone(handoverInput(input), "CreateHandoverInput"); const at = now();
           const handover: Handover = { id: crypto.randomUUID(), title: prepared.title, organization: prepared.organization, createdAt: at, updatedAt: at, sources: [], tasks: [], events: [{ id: crypto.randomUUID(), at, kind: "created", detail: JSON.stringify({ action: "created" }) }], revision: 1 };
           validateHandover(handover);
           return runTransaction(db, [STORE_HANDOVERS], "readwrite", (tx, control) => { failOnRequestError(tx.objectStore(STORE_HANDOVERS).add(handover), control.fail); control.succeed(handover); });
@@ -199,14 +215,14 @@ export function openRepository(name: string, factory: IDBFactory = globalThis.in
             } catch (error) { control.fail(error); } };
           });
         },
-        async updateHandover(handoverId, expected, patch) { nonempty(handoverId, "handover ID"); revision(expected, "expectedRevision"); const prepared = hPatch(clone(patch, "HandoverPatch")); await check(handoverId, expected); return mutate(handoverId, expected, { kind: "update-handover", patch: prepared }); },
+        async updateHandover(handoverId, expected, patch) { nonempty(handoverId, "handover ID"); revision(expected, "expectedRevision"); const prepared = clone(hPatch(patch), "HandoverPatch"); await check(handoverId, expected); return mutate(handoverId, expected, { kind: "update-handover", patch: prepared }); },
         async addSource(handoverId, expected, input) {
-          nonempty(handoverId, "handover ID"); revision(expected, "expectedRevision"); const prepared = sourceInput(clone(input, "CreateSourceInput")); await check(handoverId, expected);
+          nonempty(handoverId, "handover ID"); revision(expected, "expectedRevision"); const prepared = clone(sourceInput(input), "CreateSourceInput"); await check(handoverId, expected);
           const source: Source = { id: crypto.randomUUID(), title: prepared.title, text: prepared.text, sha256: await sha256Utf8(prepared.text), revision: 1 };
           return mutate(handoverId, expected, { kind: "add-source", source });
         },
         async updateSource(handoverId, sourceId, expected, patch) {
-          nonempty(handoverId, "handover ID"); nonempty(sourceId, "source ID"); revision(expected, "expectedRevision"); const prepared = sPatch(clone(patch, "SourcePatch"));
+          nonempty(handoverId, "handover ID"); nonempty(sourceId, "source ID"); revision(expected, "expectedRevision"); const prepared = clone(sPatch(patch), "SourcePatch");
           const handover = await check(handoverId, expected); const current = handover.sources.find((source) => source.id === sourceId);
           if (!current) throw new NotFoundError("Source was not found.");
           const nextText = prepared.text ?? current.text;
@@ -214,13 +230,13 @@ export function openRepository(name: string, factory: IDBFactory = globalThis.in
           return mutate(handoverId, expected, { kind: "update-source", sourceId, source });
         },
         async addTask(handoverId, expected, input) {
-          nonempty(handoverId, "handover ID"); revision(expected, "expectedRevision"); const prepared = tInput(clone(input, "CreateTaskInput")); const handover = await check(handoverId, expected);
+          nonempty(handoverId, "handover ID"); revision(expected, "expectedRevision"); const prepared = clone(tInput(input), "CreateTaskInput"); const handover = await check(handoverId, expected);
           const task: Task = prepared.provenance === "deterministic-suggestion"
             ? (() => { const candidate = handover.sources.flatMap(suggest).find((item) => item.title === prepared.title && item.owner === (prepared.owner ?? null) && item.dueDate === (prepared.dueDate ?? null) && equal(item.citations, prepared.citations)); if (!candidate) return invalid("Deterministic suggestion does not match current sources."); return clone(candidate, "deterministic suggestion"); })()
-            : { id: crypto.randomUUID(), title: prepared.title, owner: prepared.owner ?? null, dueDate: prepared.dueDate ?? null, citations: prepared.citations, state: "draft", reviewedAt: null, provenance: "manual" };
+            : { id: crypto.randomUUID(), title: prepared.title, owner: prepared.owner ?? null, dueDate: prepared.dueDate ?? null, citations: prepared.citations, state: "draft", reviewedAt: null, provenance: prepared.provenance ?? "manual" };
           return mutate(handoverId, expected, { kind: "add-task", task });
         },
-        async updateTask(handoverId, taskId, expected, patch) { nonempty(handoverId, "handover ID"); nonempty(taskId, "task ID"); revision(expected, "expectedRevision"); const prepared = tPatch(clone(patch, "TaskPatch")); await check(handoverId, expected); return mutate(handoverId, expected, { kind: "update-task", taskId, patch: prepared }); },
+        async updateTask(handoverId, taskId, expected, patch) { nonempty(handoverId, "handover ID"); nonempty(taskId, "task ID"); revision(expected, "expectedRevision"); const prepared = clone(tPatch(patch), "TaskPatch"); await check(handoverId, expected); return mutate(handoverId, expected, { kind: "update-task", taskId, patch: prepared }); },
         async reviewTask(handoverId, taskId, expected, decision) { nonempty(handoverId, "handover ID"); nonempty(taskId, "task ID"); revision(expected, "expectedRevision"); if (decision !== "approved" && decision !== "rejected") invalid("review decision is invalid."); await check(handoverId, expected); return mutate(handoverId, expected, { kind: "review-task", taskId, decision }); },
         async deleteHandover(handoverId, expected) {
           nonempty(handoverId, "handover ID"); revision(expected, "expectedRevision"); await check(handoverId, expected);
@@ -236,7 +252,7 @@ export function openRepository(name: string, factory: IDBFactory = globalThis.in
         async deleteSource(handoverId, sourceId, expected) { nonempty(handoverId, "handover ID"); nonempty(sourceId, "source ID"); revision(expected, "expectedRevision"); await check(handoverId, expected); return mutate(handoverId, expected, { kind: "delete-source", sourceId }, "source"); },
         async deleteTask(handoverId, taskId, expected) { nonempty(handoverId, "handover ID"); nonempty(taskId, "task ID"); revision(expected, "expectedRevision"); await check(handoverId, expected); return mutate(handoverId, expected, { kind: "delete-task", taskId }, "task"); },
         async commitImport(result) {
-          const packet = exact(clone(result, "ImportResult"), ["handover", "foreignReview", "foreignSources"], "ImportResult"); const handover = validateHandover(packet.handover);
+          const packet = clone(exact(result, ["handover", "foreignReview", "foreignSources"], "ImportResult"), "ImportResult"); const handover = validateHandover(packet.handover);
           if (handover.revision !== 1) invalid("Imported workspace must start at revision 1.");
           for (const task of handover.tasks) if (task.state !== "draft" || task.reviewedAt !== null || task.provenance !== "imported") invalid("Imported tasks must be draft, unreviewed, and imported.");
           const importRecord = metadata({ handoverId: handover.id, foreignReview: packet.foreignReview, foreignSources: packet.foreignSources }, handover);

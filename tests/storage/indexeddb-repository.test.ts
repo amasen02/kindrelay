@@ -77,6 +77,15 @@ describe("IndexedDB repository CRUD", () => {
     expect(edited.tasks[0]).toMatchObject({ state: "draft", reviewedAt: null });
   });
 
+  it("allows empty source text while still rejecting non-string source values", async () => {
+    const repository = trackRepository(await openRepository(...Object.values(freshDatabase()) as [string, IDBFactory]));
+    const handover = await createdHandover(repository);
+    const withEmptySource = await repository.addSource(handover.id, 1, { title: "Empty notes", text: "" });
+
+    expect(withEmptySource.sources[0]).toMatchObject({ text: "", sha256: await sha256Utf8("") });
+    await expect(repository.addSource(withEmptySource.id, 2, { title: "Bad", text: null } as never)).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+  });
+
   it("performs task CRUD and does not duplicate an accepted stable deterministic suggestion after manual editing", async () => {
     const repository = trackRepository(await openRepository(...Object.values(freshDatabase()) as [string, IDBFactory]));
     const handover = await createdHandover(repository);
@@ -127,6 +136,28 @@ describe("IndexedDB repository CRUD", () => {
     await expect(repository.addTask(withSource.id, 2, canonicalInput)).resolves.toMatchObject({
       tasks: [expect.objectContaining({ id: proposal.id, provenance: "deterministic-suggestion" })],
     });
+  });
+
+  it("matches suggestion citations semantically and rejects extra citation fields", async () => {
+    const repository = trackRepository(await openRepository(...Object.values(freshDatabase()) as [string, IDBFactory]));
+    const handover = await createdHandover(repository);
+    const withSource = await repository.addSource(handover.id, 1, { title: "Notes", text: "TODO: Call Morgan" });
+    const proposal = suggest(withSource.sources[0])[0];
+    const reordered = {
+      quote: proposal.citations[0].quote,
+      sourceRevision: proposal.citations[0].sourceRevision,
+      sourceId: proposal.citations[0].sourceId,
+    };
+
+    await expect(repository.addTask(withSource.id, 2, {
+      title: proposal.title, citations: [reordered], provenance: "deterministic-suggestion",
+    })).resolves.toMatchObject({ tasks: [expect.objectContaining({ id: proposal.id })] });
+    const next = await repository.getHandover(withSource.id);
+    await expect(repository.addTask(withSource.id, next!.revision, {
+      title: proposal.title,
+      citations: [{ ...reordered, untrusted: true }],
+      provenance: "deterministic-suggestion",
+    } as never)).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
   });
 
   it("rejects a forged suggestion using only CreateTaskInput fields", async () => {
@@ -191,5 +222,16 @@ describe("IndexedDB repository CRUD", () => {
     });
 
     expect(updated.tasks[0].id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+  });
+
+  it("preserves declared imported provenance while still generating a UUID", async () => {
+    const repository = trackRepository(await openRepository(...Object.values(freshDatabase()) as [string, IDBFactory]));
+    const handover = await createdHandover(repository);
+    const updated = await repository.addTask(handover.id, 1, {
+      title: "Imported draft", citations: [], provenance: "imported",
+    });
+
+    expect(updated.tasks[0]).toMatchObject({ provenance: "imported", state: "draft" });
+    expect(updated.tasks[0].id).toMatch(/^[0-9a-f-]{36}$/i);
   });
 });
